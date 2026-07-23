@@ -1,0 +1,43 @@
+<resources>
+    <style name="AppTheme" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">@color/tk_primary</item>
+        <item name="colorOnPrimary">@color/tk_on_primary</item>
+        <item name="colorPrimaryContainer">@color/tk_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/tk_on_primary_container</item>
+        <item name="colorSecondary">@color/tk_secondary</item>
+        <item name="colorOnSecondary">@color/tk_on_primary</item>
+        <item name="colorSurface">@color/tk_surface</item>
+        <item name="colorOnSurface">@color/tk_text</item>
+        <item name="colorSurfaceVariant">@color/tk_surface_raised</item>
+        <item name="colorOnSurfaceVariant">@color/tk_text_muted</item>
+        <item name="colorOutline">@color/tk_border</item>
+        <item name="colorError">@color/tk_error</item>
+        <item name="android:colorAccent">@color/tk_primary</item>
+        <item name="android:navigationBarColor">@color/tk_background</item>
+        <item name="android:statusBarColor">@color/tk_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+
+    <style name="AppTheme.Light" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">@color/tk_primary</item>
+        <item name="colorOnPrimary">@color/tk_on_primary</item>
+        <item name="colorPrimaryContainer">@color/tk_light_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/tk_light_on_primary_container</item>
+        <item name="colorSecondary">@color/tk_secondary</item>
+        <item name="colorOnSecondary">@color/tk_on_primary</item>
+        <item name="colorSurface">@color/tk_light_surface</item>
+        <item name="colorOnSurface">@color/tk_light_text</item>
+        <item name="colorSurfaceVariant">@color/tk_light_surface_raised</item>
+        <item name="colorOnSurfaceVariant">@color/tk_light_text_muted</item>
+        <item name="colorOutline">@color/tk_light_border</item>
+        <item name="colorError">@color/tk_error</item>
+        <item name="android:colorAccent">@color/tk_primary</item>
+        <item name="android:navigationBarColor">@color/tk_light_background</item>
+        <item name="android:statusBarColor">@color/tk_light_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

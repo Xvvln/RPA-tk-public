@@ -1,0 +1,22 @@
+<resources>
+    <color name="tk_background">#101114</color>
+    <color name="tk_surface">#1B1D22</color>
+    <color name="tk_surface_raised">#26282E</color>
+    <color name="tk_border">#33363E</color>
+    <color name="tk_text">#F7F7F9</color>
+    <color name="tk_text_muted">#AEB1BA</color>
+    <color name="tk_primary">#FF2C55</color>
+    <color name="tk_on_primary">#FFFFFF</color>
+    <color name="tk_primary_container">#5E1528</color>
+    <color name="tk_on_primary_container">#FFD9E0</color>
+    <color name="tk_secondary">#F65D78</color>
+    <color name="tk_error">#E23D4F</color>
+    <color name="tk_light_background">#F6F7F9</color>
+    <color name="tk_light_surface">#FFFFFF</color>
+    <color name="tk_light_surface_raised">#ECEEF2</color>
+    <color name="tk_light_border">#D7DAE0</color>
+    <color name="tk_light_text">#18191D</color>
+    <color name="tk_light_text_muted">#6C707A</color>
+    <color name="tk_light_primary_container">#FFD9E1</color>
+    <color name="tk_light_on_primary_container">#7A1530</color>
+</resources>

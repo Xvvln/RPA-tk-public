@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.vscode/
+android-app/.gradle/
+android-app/local.properties
+android-app/app/build/
+android-app/build/
+dist/
+build/
+runtime/
+临时文件/
+
+# Upstream reference checkout; keep it separate from this repository.
+tikmatrix-desktop/

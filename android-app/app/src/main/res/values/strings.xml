@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TK养号助手</string>
+    <string name="accessibility_description">只在本机读取 TikTok 页面并执行用户从悬浮窗启动的固定浏览流程；登录、验证码与敏感弹窗交由人工处理。</string>
+</resources>
