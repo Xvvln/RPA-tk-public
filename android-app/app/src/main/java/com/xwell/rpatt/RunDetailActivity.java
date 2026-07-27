@@ -166,6 +166,12 @@ public final class RunDetailActivity extends Activity {
     private String eventLabel(String type) {
         switch (type) {
             case "opening_check_started": return "开始检查";
+            case "preflight_started": return "环境预检";
+            case "preflight_passed": return "预检通过";
+            case "preflight_failed": return "预检失败";
+            case "preflight_check": return "预检项";
+            case "recovery": return "自动恢复";
+            case "opening_recovery": return "开场恢复";
             case "run_started": return "任务开始";
             case "ready_to_work": return "准备完成";
             case "search_results": return "搜索结果";
@@ -182,7 +188,8 @@ public final class RunDetailActivity extends Activity {
     }
 
     private int eventColor(String type) {
-        if ("blocked".equals(type)) return RpaPalette.RED;
+        if ("blocked".equals(type) || "preflight_failed".equals(type)) return RpaPalette.RED;
+        if ("preflight_passed".equals(type) || "ready_to_work".equals(type)) return RpaPalette.TEXT;
         if ("like".equals(type) || "favorite".equals(type) || "comment".equals(type)) return RpaPalette.PINK;
         return RpaPalette.TEXT;
     }
@@ -190,7 +197,24 @@ public final class RunDetailActivity extends Activity {
     private String detailText(JSONObject detail) {
         String message = detail.optString("message", "");
         String code = detail.optString("code", "");
+        String interruption = detail.optString("interruption_code", "");
+        String action = detail.optString("action", "");
+        if (!interruption.isEmpty() || (!action.isEmpty() && detail.has("attempt"))) {
+            StringBuilder line = new StringBuilder();
+            if (!interruption.isEmpty()) line.append(interruption);
+            if (!action.isEmpty()) {
+                if (line.length() > 0) line.append(" · ");
+                line.append(action);
+            }
+            int attempt = detail.optInt("attempt", 0);
+            if (attempt > 0) line.append(" · #").append(attempt);
+            if (!message.isEmpty()) line.append(" · ").append(message);
+            return line.toString();
+        }
         if (!message.isEmpty()) return code.isEmpty() ? message : code + " · " + message;
+        if (detail.has("status") && detail.has("checks")) {
+            return detail.optString("status", "") + " · checks=" + detail.optJSONArray("checks").length();
+        }
         return detail.toString();
     }
 

@@ -88,6 +88,8 @@
 
 用户在第一次使用时完成；之后每次开跑前引擎再验一次。
 
+权威清单与 hard/soft 分级见 **[INTERRUPT_AND_PREFLIGHT.md §3](./INTERRUPT_AND_PREFLIGHT.md)**（L0 Preflight）。
+
 1. 安装本 App  
 2. 打开权限：悬浮窗、无障碍、通知（电池优化按引导处理）  
 3. **手动**打开 TikTok 并登录好账号（App 永不做登录）  
@@ -98,11 +100,13 @@
 **通过条件：** 权限齐全 + TikTok 已安装 + 无障碍已开。  
 **不通过：** 主界面标红，禁止开始，引导去开权限。
 
+系统权限弹窗（通讯录/麦克风等）**不在养号循环里自动点 Allow**；预配置或停机人工处理。弹窗目录见 [POPUP_CATALOG.md](./POPUP_CATALOG.md)。
+
 ---
 
 ### 3.3 阶段 1：开场检查（机器，约数秒）
 
-用户点悬浮窗 **开始** 后立刻执行：
+用户点悬浮窗 **开始** 后立刻执行。完整状态机与恢复优先级见 **[INTERRUPT_AND_PREFLIGHT.md §4](./INTERRUPT_AND_PREFLIGHT.md)**（L1 Interrupt Guard）。
 
 | 步骤 | 动作 | 失败怎么处理 |
 |------|------|----------------|

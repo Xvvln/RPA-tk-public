@@ -7,6 +7,8 @@
 - 实现位置：
   - Android：`PageAnalyzer` 识别 + `WarmupEngine.recoverOne` 恢复
   - Python：`state.py` 识别 + `recovery.py` 恢复
+- **工程规格（环境预检 + 运行时打断状态机）**：[INTERRUPT_AND_PREFLIGHT.md](./INTERRUPT_AND_PREFLIGHT.md)
+- **养号权限策略（解包固化）**：[WARMUP_PERMISSION_POLICY.md](./WARMUP_PERMISSION_POLICY.md)
 
 ## 重要限制（必须先读）
 

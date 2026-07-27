@@ -27,6 +27,7 @@ import android.widget.Toast;
 
 import com.xwell.rpatt.automation.PageAnalyzer;
 import com.xwell.rpatt.automation.ResolverReplayAudit;
+import com.xwell.rpatt.automation.TikTokPermissionProbe;
 import com.xwell.rpatt.automation.WarmupAccessibilityService;
 import com.xwell.rpatt.config.ConfigStore;
 import com.xwell.rpatt.config.WarmupConfig;
@@ -57,6 +58,8 @@ public final class MainActivity extends Activity {
     private TextView planTitle;
     private TextView planMeta;
     private TextView interactionDetail;
+    private TextView tiktokPermSummary;
+    private TextView tiktokPermVersion;
     private ImageView historyIcon;
     private TextView history;
     private MaterialButton startTaskButton;
@@ -89,6 +92,7 @@ public final class MainActivity extends Activity {
         }
         updateDashboard(currentConfig);
         refreshStatus();
+        refreshTikTokPermissions();
         refreshHistory();
         RunSnapshot session = WarmupSessionController.currentSession();
         boolean active = WarmupSessionController.hasActiveSession();
@@ -117,6 +121,8 @@ public final class MainActivity extends Activity {
         root.addView(buildHeader());
         root.addView(space(14));
         root.addView(buildReadinessCard());
+        root.addView(sectionLabel("TikTok 权限"));
+        root.addView(buildTikTokPermissionCard());
         root.addView(sectionLabel("任务方案"));
         root.addView(buildPlanCard());
         root.addView(sectionLabel("互动策略"));
@@ -176,6 +182,43 @@ public final class MainActivity extends Activity {
         content.addView(divider(true));
         content.addView(tiktokCell.view, weighted());
         return materialCard(content, 14, RpaPalette.BORDER);
+    }
+
+    /** Compact summary; detail lives in {@link TikTokPermissionActivity}. */
+    private View buildTikTokPermissionCard() {
+        LinearLayout content = column();
+        content.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        LinearLayout header = row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout copy = column();
+        tiktokPermSummary = text("检测中…", 15, RpaPalette.TEXT);
+        tiktokPermSummary.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        tiktokPermVersion = text("点开查看并处理", 12, RpaPalette.TEXT_MUTED);
+        tiktokPermVersion.setPadding(0, dp(3), 0, 0);
+        copy.addView(tiktokPermSummary);
+        copy.addView(tiktokPermVersion);
+        header.addView(copy, weighted());
+        header.addView(trailingIcon());
+        content.addView(header);
+
+        MaterialCardView card = materialCard(content, 12, RpaPalette.BORDER);
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view ->
+                startActivity(new Intent(this, TikTokPermissionActivity.class)));
+        return card;
+    }
+
+    private void refreshTikTokPermissions() {
+        if (tiktokPermSummary == null) return;
+        TikTokPermissionProbe.Report report = TikTokPermissionProbe.probe(this);
+        boolean friendly = report.warmupFriendly();
+        int accent = !report.tiktokInstalled ? RpaPalette.RED
+                : (friendly ? RpaPalette.GREEN : RpaPalette.AMBER);
+        tiktokPermSummary.setText(report.summaryLine());
+        tiktokPermSummary.setTextColor(accent);
+        tiktokPermVersion.setText(report.detailHint());
     }
 
     private View buildPlanCard() {
@@ -533,6 +576,7 @@ public final class MainActivity extends Activity {
             case "search_result_not_opened": return "需人工处理 · 未打开搜索结果";
             case "next_video_unverified": return "需人工处理 · 未能确认切换到下一条";
             case "unexpected_page": return "需人工处理 · 页面状态异常";
+            case "accessibility_window_gap": return "需人工处理 · 无障碍短暂读不到窗口，请回 TikTok 重试";
             case "tiktok_not_foreground": return "需人工处理 · TikTok 不在前台";
             case "accessibility_disconnected": return "需人工处理 · 无障碍未连接";
             case "process_interrupted": return "需人工处理 · 任务进程异常中断";

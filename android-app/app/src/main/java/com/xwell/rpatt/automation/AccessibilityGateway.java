@@ -73,20 +73,33 @@ public final class AccessibilityGateway {
     }
 
     public UiSnapshot snapshot() {
+        // OEM accessibility bridges sometimes return an empty window list for one or two frames
+        // after pause / notification shade / activity resume. Retry before treating as unknown.
+        UiSnapshot last = captureSnapshotOnce();
+        for (int attempt = 0; attempt < 2 && isEmptyObservation(last); attempt++) {
+            SystemClock.sleep(120 + attempt * 80L);
+            last = captureSnapshotOnce();
+        }
+        return last;
+    }
+
+    private UiSnapshot captureSnapshotOnce() {
         List<UiNode> nodes = new ArrayList<>();
         List<UiWindow> windows = new ArrayList<>();
         List<AccessibilityWindowInfo> availableWindows = service.getWindows();
-        for (AccessibilityWindowInfo window : availableWindows) {
-            AccessibilityNodeInfo root = window.getRoot();
-            Rect bounds = new Rect();
-            window.getBoundsInScreen(bounds);
-            String packageName = root == null ? "" : value(root.getPackageName());
-            windows.add(new UiWindow(window.getId(), packageName, window.getType(),
-                    window.getLayer(), window.isActive(), window.isFocused(),
-                    window.isAccessibilityFocused(), root != null, bounds));
-            if (root != null) {
-                traverse(root, nodes, window.getId(), "0");
-                root.recycle();
+        if (availableWindows != null) {
+            for (AccessibilityWindowInfo window : availableWindows) {
+                AccessibilityNodeInfo root = window.getRoot();
+                Rect bounds = new Rect();
+                window.getBoundsInScreen(bounds);
+                String packageName = root == null ? "" : value(root.getPackageName());
+                windows.add(new UiWindow(window.getId(), packageName, window.getType(),
+                        window.getLayer(), window.isActive(), window.isFocused(),
+                        window.isAccessibilityFocused(), root != null, bounds));
+                if (root != null) {
+                    traverse(root, nodes, window.getId(), "0");
+                    root.recycle();
+                }
             }
         }
         if (nodes.isEmpty()) {
@@ -104,6 +117,14 @@ public final class AccessibilityGateway {
                 PageAnalyzer.TIKTOK_PACKAGE, service.getPackageName());
         return new UiSnapshot(System.currentTimeMillis(), decision.packageName,
                 displayWidth(), displayHeight(), nodes, windows, decision);
+    }
+
+    private static boolean isEmptyObservation(UiSnapshot snapshot) {
+        return snapshot == null
+                || snapshot.nodes == null
+                || snapshot.nodes.isEmpty()
+                || snapshot.windows == null
+                || snapshot.windows.isEmpty();
     }
 
     /** Write only to a control that has already passed a multi-signal role contract. */
@@ -189,6 +210,99 @@ public final class AccessibilityGateway {
             }
         }
         return false;
+    }
+
+    /**
+     * Deny a system GrantPermissionsActivity (or equivalent) without requiring TikTok focus.
+     * Only taps deny-family labels; never Allow/允许.
+     */
+    public boolean denySystemPermissionDialog(String... denyLabels) {
+        String[] labels = InterruptPolicy.filterSoftLabels(
+                denyLabels == null || denyLabels.length == 0
+                        ? InterruptPolicy.SYSTEM_PERMISSION_DENY_LABELS
+                        : denyLabels);
+        if (labels.length == 0) return false;
+        if (clickTextAnyWindow(labels)) return true;
+        if (tapDenyLabelAnyPackage(labels)) return true;
+        // Last resort: BACK often dismisses as deny on some OEMs; never taps Allow.
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+    }
+
+    /** ACTION_CLICK across every window root (permission controller is not TikTok). */
+    private boolean clickTextAnyWindow(String... labels) {
+        List<AccessibilityWindowInfo> windows = service.getWindows();
+        if (windows != null) {
+            for (AccessibilityWindowInfo window : windows) {
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                try {
+                    if (clickMatching(root, labels, false)) return true;
+                } finally {
+                    root.recycle();
+                }
+            }
+        }
+        AccessibilityNodeInfo active = service.getRootInActiveWindow();
+        if (active == null) return false;
+        try {
+            return clickMatching(active, labels, false);
+        } finally {
+            active.recycle();
+        }
+    }
+
+    /**
+     * Gesture-tap deny labels in any package. Uses a bypass path because system permission
+     * sheets steal focus from TikTok and {@link #targetInteractionAllowed()} would block.
+     */
+    private boolean tapDenyLabelAnyPackage(String... labels) {
+        UiSnapshot snapshot = snapshot();
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            String text = node.text == null ? "" : node.text.trim();
+            String desc = node.description == null ? "" : node.description.trim();
+            for (String label : labels) {
+                if (label == null) continue;
+                if (label.equalsIgnoreCase(text) || label.equalsIgnoreCase(desc)) {
+                    if (InterruptPolicy.isPrimaryAcceptLabel(text)
+                            || InterruptPolicy.isPrimaryAcceptLabel(desc)) {
+                        continue;
+                    }
+                    if (gestureBypassTargetGate(node.bounds, 100)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** dispatchGesture without requiring TikTok foreground (system dialogs only). */
+    private boolean gestureBypassTargetGate(android.graphics.Rect bounds, long durationMs) {
+        if (!centerInsideDisplay(bounds)) return false;
+        Path path = new Path();
+        path.moveTo(bounds.exactCenterX(), bounds.exactCenterY());
+        GestureDescription description = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(80, durationMs)))
+                .build();
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean completed = new AtomicBoolean(false);
+        boolean dispatched = service.dispatchGesture(description,
+                new AccessibilityService.GestureResultCallback() {
+                    @Override public void onCompleted(GestureDescription gestureDescription) {
+                        completed.set(true);
+                        latch.countDown();
+                    }
+
+                    @Override public void onCancelled(GestureDescription gestureDescription) {
+                        latch.countDown();
+                    }
+                }, null);
+        if (!dispatched) return false;
+        try {
+            latch.await(durationMs + 3000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
+        return completed.get();
     }
 
     /** Returns a visible action control in TikTok's right-side action rail. */
@@ -303,6 +417,14 @@ public final class AccessibilityGateway {
     public boolean pressBack() {
         return targetInteractionAllowed()
                 && service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+    }
+
+    /**
+     * System BACK without requiring TikTok foreground. Used for anomaly recovery when the
+     * focused window is a sheet, soft-ask, or unclassified page.
+     */
+    public boolean pressBackAlways() {
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
     }
 
     public boolean openFirstSearchVideo() {

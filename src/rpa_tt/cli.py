@@ -7,7 +7,8 @@ from pathlib import Path
 
 from .artifacts import create_run_directory
 from .browse import BrowseConfig, BrowseRunner
-from .device import build_report, connect
+from .device import connect
+from .preflight import run_preflight
 from .recovery import SafeRecovery
 from .state import inspect_device_state
 from .tiktok import TikTokController
@@ -134,7 +135,7 @@ def main() -> None:
         device = connect(args.serial)
 
         if args.command == "doctor":
-            print(json.dumps(build_report(device).to_dict(), ensure_ascii=False, indent=2))
+            print(json.dumps(run_preflight(device).to_dict(), ensure_ascii=False, indent=2))
             return
 
         if args.command == "state":

@@ -5,6 +5,13 @@ from dataclasses import asdict, dataclass
 
 import uiautomator2 as u2
 
+from .interrupt_policy import (
+    CONTACTS_DENY_LABELS,
+    GOT_IT_LABELS,
+    INTEREST_SKIP_LABELS,
+    filter_soft_labels,
+    soft_dismiss_click_labels,
+)
 from .state import UIState, inspect_device_state, raise_for_blockers
 
 
@@ -22,56 +29,95 @@ HOME_RECOVERABLE_PAGES = {
 
 
 @dataclass(frozen=True)
+class RecoveryAction:
+    """One planned recovery step with the interruption code that motivated it."""
+
+    interruption_code: str
+    action: str
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RecoveryReport:
     expected_page: str
     recovered: bool
     actions: list[str]
+    steps: list[RecoveryAction]
     final_state: UIState
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)
         result["final_state"] = self.final_state.to_dict()
+        result["steps"] = [step.to_dict() for step in self.steps]
         return result
 
 
-def plan_recovery(state: UIState, expected_page: str) -> list[str]:
+def plan_recovery_steps(state: UIState, expected_page: str) -> list[RecoveryAction]:
     """Return context-aware reversible recovery actions in priority order."""
     if state.blockers:
         return []
 
-    actions: list[str] = []
+    steps: list[RecoveryAction] = []
     interruptions = set(state.interruptions)
     if "system_input_method_dialog" in interruptions:
-        actions.append("press_back")
+        steps.append(RecoveryAction("system_input_method_dialog", "press_back"))
     if "video_options_sheet" in interruptions:
-        actions.append("press_back")
+        steps.append(RecoveryAction("video_options_sheet", "press_back"))
     if state.keyboard_visible and expected_page not in INPUT_PAGES:
-        actions.append("hide_keyboard")
+        steps.append(RecoveryAction("keyboard_visible", "hide_keyboard"))
     if state.page == "comments" and expected_page != "comments":
-        actions.append("close_comments")
+        steps.append(RecoveryAction("comments_open", "close_comments"))
     if "got_it_popup" in interruptions:
-        actions.append("dismiss_got_it")
+        steps.append(RecoveryAction("got_it_popup", "dismiss_got_it"))
     if "interest_survey" in interruptions:
-        actions.append("dismiss_interest_survey")
+        steps.append(RecoveryAction("interest_survey", "dismiss_interest_survey"))
+    if "contacts_sync_prompt" in interruptions:
+        steps.append(RecoveryAction("contacts_sync_prompt", "deny_contacts"))
     if interruptions.intersection(
         {
             "collections_popup",
             "follow_friends_popup",
-            "contacts_sync_prompt",
             "link_email_popup",
             "notification_prompt",
             "promo_banner",
             "generic_dismiss_popup",
         }
     ):
-        actions.append("dismiss_popup")
+        # Prefer the most specific named code when present.
+        for code in (
+            "collections_popup",
+            "follow_friends_popup",
+            "link_email_popup",
+            "notification_prompt",
+            "promo_banner",
+            "generic_dismiss_popup",
+        ):
+            if code in interruptions:
+                steps.append(RecoveryAction(code, "dismiss_popup"))
+                break
     if "notification_banner" in interruptions:
-        actions.append("dismiss_notification")
+        steps.append(RecoveryAction("notification_banner", "dismiss_notification"))
     if "suggestion_page" in interruptions and expected_page == "feed":
-        actions.append("skip_suggestion")
+        steps.append(RecoveryAction("suggestion_page", "skip_suggestion"))
     if state.page in HOME_RECOVERABLE_PAGES and expected_page == "feed":
-        actions.append("navigate_home")
-    return list(dict.fromkeys(actions))
+        steps.append(RecoveryAction(state.page, "navigate_home"))
+
+    # Deduplicate by action while keeping first interruption_code.
+    seen_actions: set[str] = set()
+    unique: list[RecoveryAction] = []
+    for step in steps:
+        if step.action in seen_actions:
+            continue
+        seen_actions.add(step.action)
+        unique.append(step)
+    return unique
+
+
+def plan_recovery(state: UIState, expected_page: str) -> list[str]:
+    """Return recovery action names only (backward-compatible)."""
+    return [step.action for step in plan_recovery_steps(state, expected_page)]
 
 
 class SafeRecovery:
@@ -82,17 +128,19 @@ class SafeRecovery:
 
     def recover(self, expected_page: str, max_actions: int = 3) -> RecoveryReport:
         actions: list[str] = []
+        steps: list[RecoveryAction] = []
         state = self._read_state()
 
         for _ in range(max_actions):
             raise_for_blockers(state)
-            planned = plan_recovery(state, expected_page)
+            planned = plan_recovery_steps(state, expected_page)
             if not planned:
                 break
-            action = planned[0]
-            if not self._execute(action):
+            step = planned[0]
+            if not self._execute(step.action):
                 break
-            actions.append(action)
+            actions.append(step.action)
+            steps.append(step)
             time.sleep(0.6)
             state = self._read_state()
 
@@ -101,6 +149,7 @@ class SafeRecovery:
             expected_page=expected_page,
             recovered=state.page == expected_page,
             actions=actions,
+            steps=steps,
             final_state=state,
         )
 
@@ -114,34 +163,21 @@ class SafeRecovery:
         if action == "close_comments":
             return self._click_description(("关闭", "Close")) or self._press_back()
         if action == "dismiss_got_it":
-            return self._click_text(("我知道了", "知道了", "Got it")) or self._click_text(
-                ("以后再说", "暂不", "Not now", "Dismiss")
+            return self._click_text(filter_soft_labels(GOT_IT_LABELS)) or self._click_text(
+                soft_dismiss_click_labels()
             ) or self._click_description(("关闭", "Close"))
         if action == "dismiss_interest_survey":
             return self._click_text(
-                ("跳过", "Skip", "以后再说", "Not now", "Maybe later")
+                filter_soft_labels(INTEREST_SKIP_LABELS)
             ) or self._press_back()
-        if action == "dismiss_popup":
+        if action == "deny_contacts":
             return self._click_text(
-                (
-                    "以后再说",
-                    "下次再说",
-                    "稍后再说",
-                    "暂不",
-                    "先不了",
-                    "不用了",
-                    "跳过",
-                    "不允许",
-                    "Not now",
-                    "Maybe later",
-                    "No thanks",
-                    "No, thanks",
-                    "Don't allow",
-                    "Don’t allow",
-                    "Dismiss",
-                    "Skip",
-                )
-            ) or self._click_description(("关闭", "Close")) or self._press_back()
+                filter_soft_labels(CONTACTS_DENY_LABELS)
+            ) or self._click_text(soft_dismiss_click_labels()) or self._press_back()
+        if action == "dismiss_popup":
+            return self._click_text(soft_dismiss_click_labels()) or self._click_description(
+                ("关闭", "Close")
+            ) or self._press_back()
         if action == "dismiss_notification":
             width, height = self.device.window_size()
             self.device.swipe(

@@ -27,9 +27,34 @@ public final class PageStateSafetyTest {
         PageState blocked = new PageState(PageState.Page.UNKNOWN, "none",
                 Collections.singletonList("captcha"), Collections.emptyList(), 0d,
                 Collections.singletonList("blocker:captcha"));
+        PageState permissionDeny = new PageState(PageState.Page.UNKNOWN, "none",
+                Collections.emptyList(),
+                Collections.singletonList("system_permission_prompt"), 0d,
+                Collections.singletonList("interruption:system_permission_prompt"));
 
         assertTrue(PageStability.isTransientUnknown(unknown));
         assertFalse(PageStability.isTransientUnknown(blocked));
+        assertFalse(PageStability.isTransientUnknown(permissionDeny));
+    }
+
+    @Test
+    public void emptyAccessibilityWindowsAreObservationGapNotNavigation() {
+        PageState empty = new PageState(PageState.Page.UNKNOWN, "none",
+                Collections.emptyList(), Collections.emptyList(), 0d,
+                Arrays.asList(
+                        "classification:insufficient_or_conflicting_evidence",
+                        "foreground:unknown",
+                        "foreground_confidence:0.00",
+                        "windows:0",
+                        "decision:no_application_candidate",
+                        "classification:foreground_not_authorized"));
+        assertTrue(PageStability.isEmptyWindowObservation(empty));
+        assertTrue(PageStability.isTransientUnknown(empty));
+
+        PageState external = new PageState(PageState.Page.UNKNOWN, "none",
+                Collections.emptyList(), Collections.emptyList(), 0d,
+                Arrays.asList("window:9:external_focused", "windows:2"));
+        assertFalse(PageStability.isEmptyWindowObservation(external));
     }
 
     @Test

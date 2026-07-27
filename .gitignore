@@ -14,5 +14,9 @@ build/
 runtime/
 临时文件/
 
+# Capture artifacts from tools/popup-hook runs; only fixtures are tracked.
+tools/popup-hook/out/*
+!tools/popup-hook/out/fixtures/
+
 # Upstream reference checkout; keep it separate from this repository.
 tikmatrix-desktop/

@@ -44,6 +44,10 @@
             android:name=".RunDetailActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".TikTokPermissionActivity"
+            android:exported="false" />
+
         <service
             android:name=".automation.WarmupAccessibilityService"
             android:exported="false"

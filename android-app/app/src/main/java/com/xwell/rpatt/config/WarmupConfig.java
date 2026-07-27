@@ -49,6 +49,8 @@ public final class WarmupConfig {
     public boolean swipeRandomizationEnabled = true;
     public int pauseMinSeconds = 1;
     public int pauseMaxSeconds = 4;
+    /** Skip in-feed live tiles after watch (no like/comment/share). Default on. */
+    public boolean skipLive = true;
     public boolean openComments = true;
     public double commentReadRate = 1.0;
     public boolean commentsOnlyIfRelevant = false;
@@ -230,6 +232,7 @@ public final class WarmupConfig {
                     .put("swipe_pace", swipePace)
                     .put("swipe_randomization_enabled", swipeRandomizationEnabled)
                     .put("pause_seconds", new JSONArray().put(pauseMinSeconds).put(pauseMaxSeconds))
+                    .put("skip_live", skipLive)
                     .put("open_comments", openComments)
                     .put("comment_rate", commentReadRate)
                     .put("comments_only_if_relevant", commentsOnlyIfRelevant)
@@ -338,6 +341,7 @@ public final class WarmupConfig {
             int[] pauses = pair(browse.optJSONArray("pause_seconds"), config.pauseMinSeconds, config.pauseMaxSeconds);
             config.pauseMinSeconds = pauses[0];
             config.pauseMaxSeconds = pauses[1];
+            config.skipLive = browse.optBoolean("skip_live", config.skipLive);
             config.openComments = browse.optBoolean("open_comments", config.openComments);
             config.commentReadRate = browse.optDouble("comment_rate", config.commentReadRate);
             config.commentsOnlyIfRelevant = browse.optBoolean(

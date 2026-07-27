@@ -58,11 +58,35 @@ public final class PageAnalyzer {
                 || contains(systemText, "选择输入法", "选择键盘", "choose input method", "select input method");
         if (inputMethodDialog) interruptions.add("system_input_method_dialog");
         boolean unknownSystemDialog = false;
+        boolean permissionControllerVisible = false;
+        boolean systemPermissionDenyAvailable = false;
         for (UiNode node : snapshot.nodes) {
-            if (node.packageName.contains("permissioncontroller")) blockers.add("permission_required");
-            if ("android".equals(node.packageName) && "android:id/parentPanel".equals(node.id)) unknownSystemDialog = true;
+            if (!snapshot.isVisible(node)) continue;
+            String pkg = node.packageName == null ? "" : node.packageName;
+            if (pkg.contains("permissioncontroller")) {
+                permissionControllerVisible = true;
+                if (InterruptPolicy.isSystemPermissionDenyLabel(node.searchableText())
+                        || InterruptPolicy.isSystemPermissionDenyLabel(node.text)
+                        || InterruptPolicy.isSystemPermissionDenyLabel(node.description)) {
+                    systemPermissionDenyAvailable = true;
+                }
+            }
+            if ("android".equals(pkg) && "android:id/parentPanel".equals(node.id)) {
+                unknownSystemDialog = true;
+            }
         }
-        if (unknownSystemDialog && !inputMethodDialog) blockers.add("unknown_system_dialog");
+        // Runtime permission sheets with a Deny/拒绝 CTA are auto-recoverable (never Allow).
+        // Only block when the controller is present but no deny path is visible.
+        if (permissionControllerVisible) {
+            if (systemPermissionDenyAvailable) {
+                interruptions.add("system_permission_prompt");
+            } else {
+                blockers.add("permission_required");
+            }
+        }
+        if (unknownSystemDialog && !inputMethodDialog && !permissionControllerVisible) {
+            blockers.add("unknown_system_dialog");
+        }
 
         // Soft TikTok promos / soft-asks are recoverable. Markers come from runtime UI text
         // plus static strings mined from installed TikTok 46.1.3 resources (see docs/POPUP_CATALOG.md).
@@ -70,9 +94,11 @@ public final class PageAnalyzer {
         addWhen(systemText, interruptions, "collections_popup", "共享收藏", "与好友创建收藏",
                 "shared collections", "collections with a friend");
         addWhen(systemText, interruptions, "follow_friends_popup", "关注你的朋友", "查找联系人",
-                "follow your friends", "find your contacts", "find friends");
+                "查找通讯录好友", "follow your friends", "find your contacts", "find friends");
         addWhen(systemText, interruptions, "contacts_sync_prompt", "同步手机通讯录好友", "同步通讯录好友",
-                "访问你的通讯录", "sync your phone contacts", "sync your contacts", "access your contacts");
+                "访问你的通讯录", "查找通讯录好友", "访问通讯录",
+                "sync your phone contacts", "sync your contacts", "access your contacts",
+                "find contacts friends");
         addWhen(systemText, interruptions, "link_email_popup", "关联邮箱", "连接邮箱", "添加邮箱",
                 "link email", "linking your android email");
         addWhen(systemText, interruptions, "notification_prompt", "开启通知", "打开通知", "打开推送通知",
@@ -84,6 +110,8 @@ public final class PageAnalyzer {
         addWhen(systemText, interruptions, "suggestion_page", "上滑跳过", "swipe up to skip");
         addWhen(systemText, interruptions, "interest_survey", "选择你感兴趣", "choose your interests",
                 "内容偏好", "content preferences");
+        addWhen(systemText, interruptions, "first_time_repost_guide",
+                InterruptPolicy.FIRST_TIME_REPOST_GUIDE_MARKERS);
         addWhen(systemText, interruptions, "got_it_popup", "我知道了", "知道了", "got it");
         // Prefer specific popup codes above; generic is a fallback soft-ask CTA family from APK.
         addWhen(systemText, interruptions, "generic_dismiss_popup",
@@ -95,8 +123,8 @@ public final class PageAnalyzer {
             if (!snapshot.isVisible(node)) continue;
             String desc = node.description == null ? "" : node.description.trim().toLowerCase(Locale.ROOT);
             if (("bottom sheet".equals(desc) || "底部工作表".equals(desc))
-                    && contains(systemText, "下载", "举报", "播放速度", "不感兴趣",
-                    "download", "report", "speed", "not interested")) {
+                    && contains(systemText, "下载", "举报", "播放速度", "倍速", "不感兴趣",
+                    "download", "report", "speed", "not interested", "playback speed")) {
                 videoOptionsSheet = true;
                 break;
             }
@@ -133,6 +161,23 @@ public final class PageAnalyzer {
                     "comments:header", "comments:list", "comments:lower_input",
                     "comments:shared_panel", commentClose ? "comments:close" : "comments:no_close"));
         }
+        // Empty first-comment panel ("抢沙发") has lower composer but no list rows; still COMMENTS.
+        // Scan nodes directly — systemText() excludes mid-panel copy when a header exists.
+        boolean emptyCommentPanel = lowerCommentField && commentField != null
+                && !searchResultAnchor
+                && hasVisibleText(snapshot,
+                "抢沙发", "喜欢这个作品", "还没有评论", "暂无评论", "成为第一个评论", "抢首评",
+                "be the first to comment", "no comments yet", "first to comment");
+        if (emptyCommentPanel && !fullCommentContract) {
+            candidates.add(candidate(PageState.Page.COMMENTS, 0.92d,
+                    "comments:empty_panel", "comments:lower_input",
+                    commentClose ? "comments:close" : "comments:no_close"));
+        } else if (lowerCommentField && commentField != null && commentClose
+                && !searchResultAnchor && !fullCommentContract) {
+            // Composer + close without list (sheet mid-open / photo post) — still comments sheet.
+            candidates.add(candidate(PageState.Page.COMMENTS, 0.86d,
+                    "comments:composer_close", "comments:lower_input", "comments:close"));
+        }
         if (searchField && searchEmpty && videoActionCount < 2 && !fullCommentContract) {
             candidates.add(candidate(PageState.Page.SEARCH_EMPTY, 0.94d,
                     "search:field", "search:empty_message"));
@@ -145,11 +190,34 @@ public final class PageAnalyzer {
             candidates.add(candidate(PageState.Page.SEARCH_RESULTS, 0.90d,
                     "search:field", "search:results_anchor"));
         }
+        // Related-query chips under a result ("其他人搜索的内容") without a full video rail.
+        boolean relatedSearchSection = hasVisibleText(snapshot,
+                "其他人搜索的内容", "相关搜索", "people also searched", "others searched");
+        if (relatedSearchSection && videoActionCount < 2 && !fullCommentContract
+                && !emptyCommentPanel) {
+            candidates.add(candidate(PageState.Page.SEARCH_RESULTS, 0.88d,
+                    "search:related_queries"));
+        }
         // A video opened from search may retain a top search field. Two independent visible
         // actions are required, and a live results grid is strong counter-evidence.
         if (videoActionCount >= 2 && !searchResultAnchor && !fullCommentContract) {
             candidates.add(candidate(PageState.Page.FEED, videoActionCount >= 3 ? 0.92d : 0.86d,
                     "feed:video_actions=" + videoActionCount));
+        }
+        // Search-detail / photo players often expose only 1 resolvable rail control for a frame.
+        if (videoActionCount == 1 && searchField && !searchResultAnchor && !fullCommentContract
+                && !emptyCommentPanel && !relatedSearchSection) {
+            candidates.add(candidate(PageState.Page.FEED, 0.80d,
+                    "feed:search_player_weak_actions=1"));
+        }
+        // Live cells in the For You stream keep 推荐+首页 chrome but often omit standard
+        // "like video" / "share video" content-descriptions, so videoActionCount stays < 2 and
+        // previously collapsed to UNKNOWN mid-watch (unexpected_page).
+        boolean liveSurface = isLiveSurface(systemText);
+        boolean recommendationChrome = hasRecommendationChrome(snapshot);
+        if (liveSurface && recommendationChrome && !searchResultAnchor && !fullCommentContract) {
+            candidates.add(candidate(PageState.Page.FEED, 0.90d,
+                    "feed:live_surface", "home:recommendation_chrome"));
         }
         if (selected(snapshot, "收件箱", "inbox")) {
             candidates.add(candidate(PageState.Page.INBOX, 0.78d, "nav:inbox_selected"));
@@ -184,16 +252,63 @@ public final class PageAnalyzer {
         }
 
         if (page == PageState.Page.COMMENTS) interruptions.add("comments_open");
+        // Partial composer after send: not full COMMENTS page, but recoverable when FEED expected.
+        if (page == PageState.Page.UNKNOWN && lowerCommentField && commentField != null
+                && !searchResultAnchor) {
+            interruptions.add("comments_open");
+            evidence.add("comments:partial_composer_recoverable");
+        }
         if (page == PageState.Page.INBOX) interruptions.add("inbox_page");
         String contentKind = "none";
         if (page == PageState.Page.FEED) {
             if (contains(systemText, "照片", "photo")) contentKind = "photo";
-            else if (contains(systemText, "直播中", "live now")) contentKind = "live";
+            else if (isLiveSurface(systemText)) contentKind = "live";
             else if (contains(systemText, "赞助内容", "sponsored")) contentKind = "advertisement";
             else contentKind = "video";
         }
         return new PageState(page, contentKind, new ArrayList<>(blockers),
                 new ArrayList<>(interruptions), confidence, evidence);
+    }
+
+    /** For-You live tile / in-feed live player markers (ZH + EN). */
+    public static boolean isLiveSurface(String systemText) {
+        return contains(systemText,
+                "直播中", "live now", "点击进入直播间", "enter live", "join live", "go live",
+                "进入直播间", "tap to enter live", "live room");
+    }
+
+    /** True when the snapshot shows an in-feed live surface (any package text). */
+    public static boolean isLiveFeedSnapshot(UiSnapshot snapshot) {
+        if (snapshot == null) return false;
+        StringBuilder blob = new StringBuilder();
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            blob.append(node.searchableText()).append(' ');
+        }
+        return isLiveSurface(blob.toString().toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * Top 推荐 + bottom 首页 — same chrome VideoSurfaceContext uses for RECOMMENDATION_HOME.
+     * Geometry guards avoid matching in-body copy.
+     */
+    static boolean hasRecommendationChrome(UiSnapshot snapshot) {
+        boolean recommendationTab = false;
+        boolean homeNav = false;
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            String text = node.searchableText();
+            int cy = centerY(node);
+            if (!recommendationTab && cy < snapshot.displayHeight * 0.22f
+                    && contains(text, "推荐", "for you")) {
+                recommendationTab = true;
+            }
+            if (!homeNav && cy > snapshot.displayHeight * 0.85f
+                    && contains(text, "首页", "home")) {
+                homeNav = true;
+            }
+        }
+        return recommendationTab && homeNav;
     }
 
     private static String systemText(UiSnapshot snapshot) {
@@ -222,6 +337,14 @@ public final class PageAnalyzer {
     private static boolean contains(String text, String... markers) {
         String normalized = text.toLowerCase(Locale.ROOT);
         for (String marker : markers) if (normalized.contains(marker.toLowerCase(Locale.ROOT))) return true;
+        return false;
+    }
+
+    private static boolean hasVisibleText(UiSnapshot snapshot, String... markers) {
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            if (contains(node.searchableText(), markers)) return true;
+        }
         return false;
     }
 

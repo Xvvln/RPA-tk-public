@@ -90,6 +90,55 @@ public final class VideoSurfaceContextTest {
                 VideoSurfaceContext.consecutive(home, detail).kind);
     }
 
+    @Test
+    public void consecutiveToleratesTransientUnknownPeerOnRecommendationHome() {
+        VideoSurfaceContext.Result home = VideoSurfaceContext.analyze(snapshot(
+                node("", "", "推荐", "android.widget.LinearLayout", 768, 103, 908, 277),
+                node("", "", "首页", "android.widget.FrameLayout", 0, 2205, 216, 2249),
+                action("fux", "点赞视频。100 个赞", 888, 1191, 1080, 1371),
+                action("efj", "阅读或添加评论。10 条评论", 888, 1371, 1080, 1551)));
+        VideoSurfaceContext.Result blank = VideoSurfaceContext.analyze(snapshot(
+                action("fux", "点赞视频。100 个赞", 888, 1191, 1080, 1371)));
+
+        assertEquals(VideoSurfaceContext.Kind.RECOMMENDATION_HOME, home.kind);
+        assertEquals(VideoSurfaceContext.Kind.UNKNOWN, blank.kind);
+        VideoSurfaceContext.Result stable = VideoSurfaceContext.consecutive(home, blank);
+        assertEquals(VideoSurfaceContext.Kind.RECOMMENDATION_HOME, stable.kind);
+        assertTrue(stable.evidence.contains("context:tolerate_transient_unknown_peer"));
+    }
+
+    @Test
+    public void consecutiveStillRejectsHomeVersusSearchConflict() {
+        VideoSurfaceContext.Result home = VideoSurfaceContext.analyze(snapshot(
+                node("", "", "推荐", "android.widget.LinearLayout", 768, 103, 908, 277),
+                node("", "", "首页", "android.widget.FrameLayout", 0, 2205, 216, 2249)));
+        VideoSurfaceContext.Result detail = VideoSurfaceContext.analyze(snapshot(
+                node("bna", "", "返回", "android.widget.ImageView", 18, 103, 174, 259),
+                node("lv8", "", "搜索", "android.widget.ImageView", 210, 157, 258, 205),
+                action("fux", "点赞视频。1.5 万 个赞", 888, 1191, 1080, 1371),
+                action("efj", "阅读或添加评论。148 条评论", 888, 1371, 1080, 1551)));
+
+        assertEquals(VideoSurfaceContext.Kind.SEARCH_DETAIL, detail.kind);
+        assertEquals(VideoSurfaceContext.Kind.UNKNOWN,
+                VideoSurfaceContext.consecutive(home, detail).kind);
+    }
+
+    @Test
+    public void consecutiveDoesNotTreatSearchBackFrameAsHomeFlicker() {
+        VideoSurfaceContext.Result home = VideoSurfaceContext.analyze(snapshot(
+                node("", "", "推荐", "android.widget.LinearLayout", 768, 103, 908, 277),
+                node("", "", "首页", "android.widget.FrameLayout", 0, 2205, 216, 2249)));
+        // Partial search surface: back is visible but action rail not yet resolved.
+        VideoSurfaceContext.Result partialSearch = VideoSurfaceContext.analyze(snapshot(
+                node("bna", "", "返回", "android.widget.ImageView", 18, 103, 174, 259),
+                node("lv8", "", "搜索", "android.widget.ImageView", 210, 157, 258, 205)));
+
+        assertEquals(VideoSurfaceContext.Kind.UNKNOWN, partialSearch.kind);
+        assertTrue(partialSearch.evidence.contains("search_detail:back_present"));
+        assertEquals(VideoSurfaceContext.Kind.UNKNOWN,
+                VideoSurfaceContext.consecutive(home, partialSearch).kind);
+    }
+
     private static UiSnapshot snapshot(UiNode... nodes) {
         return new UiSnapshot(1L, PageAnalyzer.TIKTOK_PACKAGE, 1080, 2249,
                 Arrays.asList(nodes));

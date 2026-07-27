@@ -1,0 +1,454 @@
+{
+  "tag": "video_options_sheet",
+  "source": "tools/popup-hook/out/20260723-172954-sheet/ui-hierarchy.xml",
+  "node_count": 30,
+  "markers": {
+    "video_options_sheet": true,
+    "comments": false,
+    "soft_cta": false,
+    "share_sheet": true
+  },
+  "sample_labels": [
+    "底部工作表",
+    "举报",
+    "举报",
+    "不感兴趣",
+    "不感兴趣",
+    "添加到限时动态",
+    "添加到限时动态",
+    "下载",
+    "下载",
+    "清屏",
+    "清屏",
+    "自动滚动",
+    "自动滚动",
+    "分享至",
+    "转发",
+    "user4708516084326",
+    "发送",
+    "Emir.",
+    "发送"
+  ],
+  "nodes": [
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/yi1",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.view.View",
+      "clickable": true,
+      "bounds": [
+        0,
+        103,
+        1080,
+        2249
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "底部工作表",
+      "resource_id": "com.zhiliaoapp.musically:id/fq6",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.FrameLayout",
+      "clickable": false,
+      "bounds": [
+        0,
+        1228,
+        1080,
+        2249
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "举报",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        27,
+        1288,
+        213,
+        1498
+      ]
+    },
+    {
+      "text": "举报",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        27,
+        1456,
+        213,
+        1498
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "不感兴趣",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        225,
+        1288,
+        411,
+        1498
+      ]
+    },
+    {
+      "text": "不感兴趣",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        225,
+        1456,
+        411,
+        1498
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "添加到限时动态",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        423,
+        1288,
+        609,
+        1540
+      ]
+    },
+    {
+      "text": "添加到限时动态",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        423,
+        1456,
+        609,
+        1540
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "下载",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        621,
+        1288,
+        807,
+        1498
+      ]
+    },
+    {
+      "text": "下载",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        621,
+        1456,
+        807,
+        1498
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "清屏",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        819,
+        1288,
+        1005,
+        1498
+      ]
+    },
+    {
+      "text": "清屏",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        819,
+        1456,
+        1005,
+        1498
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "自动滚动",
+      "resource_id": "com.zhiliaoapp.musically:id/uzu",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        1017,
+        1288,
+        1080,
+        1498
+      ]
+    },
+    {
+      "text": "自动滚动",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/uzy",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        1017,
+        1456,
+        1080,
+        1498
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/ia6",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.FrameLayout",
+      "clickable": true,
+      "bounds": [
+        0,
+        1540,
+        1080,
+        1795
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/bvd",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.RelativeLayout",
+      "clickable": true,
+      "bounds": [
+        24,
+        1576,
+        1056,
+        1771
+      ]
+    },
+    {
+      "text": "分享至",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/v0w",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        72,
+        1645,
+        480,
+        1702
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/dom",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.ImageView",
+      "clickable": true,
+      "bounds": [
+        504,
+        1612,
+        624,
+        1732
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/don",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.ImageView",
+      "clickable": true,
+      "bounds": [
+        660,
+        1612,
+        780,
+        1732
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/doo",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.ImageView",
+      "clickable": true,
+      "bounds": [
+        816,
+        1612,
+        936,
+        1732
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/l4m",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.RelativeLayout",
+      "clickable": true,
+      "bounds": [
+        24,
+        1807,
+        1056,
+        1975
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/upvote_entrance_img",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.ImageView",
+      "clickable": true,
+      "bounds": [
+        60,
+        1831,
+        180,
+        1951
+      ]
+    },
+    {
+      "text": "转发",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/upvote_entrance_tv",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        216,
+        1864,
+        972,
+        1918
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/l4l",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.view.ViewGroup",
+      "clickable": true,
+      "bounds": [
+        24,
+        1975,
+        1056,
+        2143
+      ]
+    },
+    {
+      "text": "user4708516084326",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/p3j",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        216,
+        2032,
+        645,
+        2086
+      ]
+    },
+    {
+      "text": "发送",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/cv8",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        750,
+        2023,
+        1020,
+        2095
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/l4l",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.view.ViewGroup",
+      "clickable": true,
+      "bounds": [
+        24,
+        2143,
+        1056,
+        2249
+      ]
+    },
+    {
+      "text": "Emir.",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/p3j",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.TextView",
+      "clickable": false,
+      "bounds": [
+        216,
+        2200,
+        315,
+        2249
+      ]
+    },
+    {
+      "text": "发送",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/cv8",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.widget.Button",
+      "clickable": true,
+      "bounds": [
+        750,
+        2191,
+        1020,
+        2249
+      ]
+    },
+    {
+      "text": "",
+      "content_desc": "",
+      "resource_id": "com.zhiliaoapp.musically:id/l4l",
+      "package": "com.zhiliaoapp.musically",
+      "class": "android.view.ViewGroup",
+      "clickable": true,
+      "bounds": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

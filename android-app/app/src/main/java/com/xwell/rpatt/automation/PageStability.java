@@ -11,12 +11,43 @@ public final class PageStability {
     private PageStability() {}
 
     /**
-     * UNKNOWN without a confirmed blocker is an observation gap, not proof that navigation left
-     * the expected page. Animations and OEM accessibility-window handoffs commonly produce this
-     * state for a few frames, so callers should wait for a bounded contract deadline.
+     * UNKNOWN without a confirmed blocker or recoverable interruption is an observation gap, not
+     * proof that navigation left the expected page. Animations and OEM accessibility-window
+     * handoffs commonly produce this state for a few frames, so callers should wait for a bounded
+     * contract deadline. Soft interruptions (e.g. system permission Deny sheet) are not transient
+     * — recovery must run immediately.
      */
     public static boolean isTransientUnknown(PageState state) {
-        return state.page == PageState.Page.UNKNOWN && state.blockers.isEmpty();
+        // Keep pure UNKNOWN as a short observation gap only. Callers also recover UNKNOWN via
+        // InterruptPolicy.unknown_return_feed once the wait budget is exhausted.
+        return state.page == PageState.Page.UNKNOWN
+                && state.blockers.isEmpty()
+                && (state.interruptions == null || state.interruptions.isEmpty());
+    }
+
+    /**
+     * Accessibility returned no usable application windows (common after pause, notification
+     * shade, or OEM handoff). This is not evidence the user navigated away from TikTok.
+     */
+    public static boolean isEmptyWindowObservation(PageState state) {
+        if (state == null || state.evidence == null) return false;
+        boolean emptyWindows = false;
+        boolean noApp = false;
+        boolean unauthorized = false;
+        boolean external = false;
+        for (String item : state.evidence) {
+            if (item == null) continue;
+            if (item.equals("windows:0") || item.startsWith("windows:0")) emptyWindows = true;
+            if (item.contains("no_application_candidate")) noApp = true;
+            if (item.contains("foreground_not_authorized") || item.contains("foreground:unknown")) {
+                unauthorized = true;
+            }
+            if (item.contains("external_focused") || item.contains("external_active")
+                    || item.contains("confirmsOtherApp")) {
+                external = true;
+            }
+        }
+        return !external && (emptyWindows || (noApp && unauthorized));
     }
 
     public static PageState consecutive(PageState first, PageState second) {

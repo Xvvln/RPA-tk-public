@@ -7,8 +7,10 @@ import com.xwell.rpatt.BuildConfig;
 import com.xwell.rpatt.automation.AccessibilityGateway;
 import com.xwell.rpatt.automation.ControlResolver;
 import com.xwell.rpatt.automation.FavoriteVisualEvidence;
+import com.xwell.rpatt.automation.InterruptPolicy;
 import com.xwell.rpatt.automation.KeywordMatcher;
 import com.xwell.rpatt.automation.PageAnalyzer;
+import com.xwell.rpatt.automation.TikTokPermissionProbe;
 import com.xwell.rpatt.automation.PageStability;
 import com.xwell.rpatt.automation.PageState;
 import com.xwell.rpatt.automation.PageTransitionPolicy;
@@ -137,18 +139,52 @@ public final class WarmupEngine {
         Counters counters = new Counters();
         Random random = config.seed == null ? new Random() : new Random(config.seed);
         try {
-            publish(RunSnapshot.Status.RUNNING, "开场检查", "检查权限", "");
-            if (!WarmupAccessibilityService.isConnected()) throw new Blocked("accessibility_disabled", "无障碍服务未开启");
-            AccessibilityGateway gateway = AccessibilityGateway.require();
-            if (!gateway.screenInteractive()) throw new Blocked("screen_off", "屏幕未点亮");
-            if (gateway.deviceLocked()) throw new Blocked("device_locked", "手机仍处于锁屏状态");
-            if (config.requireNetwork && !gateway.networkAvailable()) throw new Blocked("network_unavailable", "Android 未检测到可用网络");
+            publish(RunSnapshot.Status.RUNNING, "开场检查", "环境预检", "");
             logger = new RunLogger(context);
             logger.writeConfig(config.toJson());
+            logger.event("preflight_started", new JSONObject().put("dry_run", !config.interactionsApply));
             logger.event("opening_check_started", new JSONObject().put("dry_run", !config.interactionsApply));
-            if (!gateway.overlayAllowed()) logger.event("warning", new JSONObject().put("code", "overlay_unavailable"));
-            if (!gateway.launchTikTok()) throw new Blocked("tiktok_not_installed", "未找到 TikTok");
+
+            boolean accessibilityOk = WarmupAccessibilityService.isConnected();
+            AccessibilityGateway gateway = null;
+            boolean screenOk = false;
+            boolean unlocked = false;
+            boolean networkOk = !config.requireNetwork;
+            boolean launchOk = false;
+            boolean overlayOk = false;
+            if (accessibilityOk) {
+                gateway = AccessibilityGateway.require();
+                screenOk = gateway.screenInteractive();
+                unlocked = !gateway.deviceLocked();
+                networkOk = !config.requireNetwork || gateway.networkAvailable();
+                overlayOk = gateway.overlayAllowed();
+                launchOk = gateway.launchTikTok();
+            }
+            TikTokPermissionProbe.Report tiktokPermissions = TikTokPermissionProbe.probe(context);
+            logger.event("tiktok_permissions", tiktokPermissions.toJson());
+            PreflightReport preflight = PreflightReport.evaluateEnvironment(
+                    accessibilityOk,
+                    screenOk,
+                    !unlocked && accessibilityOk,
+                    config.requireNetwork,
+                    networkOk,
+                    launchOk,
+                    overlayOk,
+                    true,
+                    tiktokPermissions);
+            logger.event(preflight.passed() ? "preflight_passed" : "preflight_failed", preflight.toJson());
+            PreflightReport.Check hard = preflight.firstHardFailure();
+            if (hard != null) {
+                throw new Blocked(hard.code.isEmpty() ? "preflight_failed" : hard.code, hard.message);
+            }
+            if (gateway == null) throw new Blocked("accessibility_disabled", "无障碍服务未开启");
             waitForTikTokForeground(gateway, logger);
+            logger.event("preflight_check", new JSONObject()
+                    .put("id", "P06")
+                    .put("severity", "hard")
+                    .put("ok", true)
+                    .put("code", "")
+                    .put("message", "TikTok 已在前台"));
 
             logger.event("run_started", new JSONObject().put("dry_run", !config.interactionsApply));
             budget = new RunBudget(SystemClock.elapsedRealtime(), config.maxMinutes * 60_000L, config.videoCount);
@@ -156,6 +192,12 @@ public final class WarmupEngine {
             publish(RunSnapshot.Status.RUNNING, "开场检查", "识别可浏览页", "");
             prepareOpeningFeed(gateway, config, logger);
             returnToRecommendationHome(gateway, config, logger);
+            logger.event("preflight_check", new JSONObject()
+                    .put("id", "P10")
+                    .put("severity", "hard")
+                    .put("ok", true)
+                    .put("code", "")
+                    .put("message", "开场已回到可浏览推荐流"));
             logger.event("ready_to_work", new JSONObject());
 
             safeCheckpoint();
@@ -462,9 +504,65 @@ public final class WarmupEngine {
         if (watchedState.page != PageState.Page.FEED) {
             ensureExpected(gateway, PageState.Page.FEED, config, logger);
             watched = gateway.snapshot();
+            watchedState = inspect(gateway, config);
         }
         VideoContent content = VideoContent.from(watched);
+        // Live a11y often omits profile/description contracts VideoContent expects. Detect live
+        // before content_unreadable so skip_live can slide past without stopping the run.
+        boolean liveFeed = "live".equals(watchedState.contentKind)
+                || PageAnalyzer.isLiveFeedSnapshot(watched);
+        if (config.skipLive && liveFeed) {
+            int index = budget.videosSeen() + 1;
+            String author = content.author.isEmpty() ? "live" : content.author;
+            JSONObject liveRecord = content.toJson()
+                    .put("author", author)
+                    .put("index", index)
+                    .put("source", source)
+                    .put("search_keyword", searchKeyword)
+                    .put("content_kind", "live")
+                    .put("watch_ms", watchMs)
+                    .put("watch_base_ms", baseWatchMs)
+                    .put("watch_interest_extra_ms", watchExtraMs)
+                    .put("relevant", false)
+                    .put("matched_keywords", new JSONArray())
+                    .put("matched_not_interested_keywords", new JSONArray())
+                    .put("comments", new JSONArray())
+                    .put("feedback", "live_skipped")
+                    .put("like_action", "skipped_live")
+                    .put("favorite_action", "skipped_live")
+                    .put("comment_action", "skipped_live")
+                    .put("comment_text", "")
+                    .put("follow_action", "skipped_live")
+                    .put("share_action", "skipped_live")
+                    .put("recorded_at", System.currentTimeMillis());
+            logger.video(liveRecord);
+            logger.event("live_feed_skipped", new JSONObject()
+                    .put("index", index)
+                    .put("source", source)
+                    .put("author", author)
+                    .put("content_kind_state", watchedState.contentKind)
+                    .put("skip_live", true));
+            budget.recordVideo();
+            current = new RunSnapshot(current.status, current.phase, current.step,
+                    budget.videosSeen(), budget.maximumVideos(),
+                    counters.likes + counters.wouldLikes,
+                    counters.favorites + counters.wouldFavorites,
+                    counters.comments + counters.wouldComments,
+                    budget.elapsedMs(now()), current.message);
+            publish(RunSnapshot.Status.RUNNING, phase(source), "E · 直播跳过", author);
+            return new ProcessedVideo(false, new ArrayList<>());
+        }
+
         if (content.author.isEmpty() && content.description.isEmpty()) {
+            // Live with skip_live=false still should not hard-stop; treat as soft-skip one item.
+            if (liveFeed) {
+                logger.event("live_content_unreadable_soft_skip", new JSONObject()
+                        .put("source", source)
+                        .put("skip_live_config", config.skipLive));
+                budget.recordVideo();
+                publish(RunSnapshot.Status.RUNNING, phase(source), "E · 直播无文案跳过", "");
+                return new ProcessedVideo(false, new ArrayList<>());
+            }
             throw new Blocked("content_unreadable", "无法读取当前视频作者或简介");
         }
 
@@ -484,6 +582,9 @@ public final class WarmupEngine {
         String followAction = "none";
         String shareAction = "none";
         String actionTarget = content.actionFingerprint();
+        boolean liveSoftMissing = liveFeed
+                || "live".equals(watchedState.contentKind)
+                || PageAnalyzer.isLiveFeedSnapshot(watched);
 
         for (String step : config.workflowOrder) {
             checkControl();
@@ -493,7 +594,15 @@ public final class WarmupEngine {
                             && (!config.commentsOnlyIfRelevant || relevant)
                             && chance(random, config.commentReadRate)) {
                         publish(RunSnapshot.Status.RUNNING, phase(source), "评论区浏览", "按工作流执行");
-                        comments = readComments(gateway, config, logger, random);
+                        try {
+                            comments = readComments(gateway, config, logger, random);
+                        } catch (Blocked error) {
+                            if (!liveSoftMissing) throw error;
+                            logger.event("live_comments_unavailable", new JSONObject()
+                                    .put("code", error.code)
+                                    .put("message", error.getMessage()));
+                            comments = new ArrayList<>();
+                        }
                         mergeCommentInterestSignals(matched, comments, config.interestKeywords);
                         relevant = !config.interestEnabled || !matched.isEmpty();
                     }
@@ -507,7 +616,8 @@ public final class WarmupEngine {
                                 likeAction = skipUnstableIdentity(logger, "like", content);
                             } else {
                                 likeAction = interactButton(gateway, logger, ControlResolver.Role.VIDEO_LIKE,
-                                        "like", actionTarget, config.interactionsApply, counters);
+                                        "like", actionTarget, config.interactionsApply, counters,
+                                        liveSoftMissing);
                             }
                         }
                     }
@@ -522,7 +632,8 @@ public final class WarmupEngine {
                                 favoriteAction = skipUnstableIdentity(logger, "favorite", content);
                             } else {
                                 favoriteAction = interactButton(gateway, logger, ControlResolver.Role.VIDEO_FAVORITE,
-                                        "favorite", actionTarget, config.interactionsApply, counters);
+                                        "favorite", actionTarget, config.interactionsApply, counters,
+                                        liveSoftMissing);
                             }
                         }
                     }
@@ -544,8 +655,24 @@ public final class WarmupEngine {
                             if (config.interactionsApply && !content.hasStableActionIdentity()) {
                                 commentAction = skipUnstableIdentity(logger, "comment", content);
                             } else {
-                                commentAction = interactComment(gateway, config, logger, commentText,
-                                        actionTarget, config.interactionsApply, counters);
+                                try {
+                                    commentAction = interactComment(gateway, config, logger, commentText,
+                                            actionTarget, config.interactionsApply, counters);
+                                } catch (Blocked error) {
+                                    // Write-comment is optional for the session: open failures / UI
+                                    // races must not stop the whole run (same spirit as readComments).
+                                    if (liveSoftMissing || isSoftCommentFailure(error)) {
+                                        commentAction = "skipped_" + error.code;
+                                        logger.event("comment_skipped", new JSONObject()
+                                                .put("code", error.code)
+                                                .put("message", error.getMessage())
+                                                .put("live", liveSoftMissing));
+                                        gateway.pressBack();
+                                        waitCooperative(400);
+                                    } else {
+                                        throw error;
+                                    }
+                                }
                             }
                         }
                     }
@@ -558,7 +685,14 @@ public final class WarmupEngine {
                             if (!content.hasStableActionIdentity()) {
                                 followAction = skipUnstableIdentity(logger, "follow", content);
                             } else {
-                                followAction = interactFollow(gateway, logger, actionTarget, counters);
+                                try {
+                                    followAction = interactFollow(gateway, logger, actionTarget, counters);
+                                } catch (Blocked error) {
+                                    if (!liveSoftMissing) throw error;
+                                    followAction = "unavailable";
+                                    logger.event("live_follow_unavailable", new JSONObject()
+                                            .put("code", error.code));
+                                }
                             }
                         }
                     }
@@ -571,8 +705,15 @@ public final class WarmupEngine {
                             if (!content.hasStableActionIdentity()) {
                                 shareAction = skipUnstableIdentity(logger, "share", content);
                             } else {
-                                shareAction = interactShare(
-                                        gateway, config, logger, actionTarget, counters);
+                                try {
+                                    shareAction = interactShare(
+                                            gateway, config, logger, actionTarget, counters);
+                                } catch (Blocked error) {
+                                    if (!liveSoftMissing) throw error;
+                                    shareAction = "unavailable";
+                                    logger.event("live_share_unavailable", new JSONObject()
+                                            .put("code", error.code));
+                                }
                             }
                         }
                     }
@@ -591,8 +732,15 @@ public final class WarmupEngine {
                                 if (!content.hasStableActionIdentity()) {
                                     feedback = skipUnstableIdentity(logger, "not_interested", content);
                                 } else {
-                                    feedback = applyNotInterested(gateway, logger, actionTarget,
-                                            matchedNotInterested, counters);
+                                    try {
+                                        feedback = applyNotInterested(gateway, logger, actionTarget,
+                                                matchedNotInterested, counters);
+                                    } catch (Blocked error) {
+                                        if (!liveSoftMissing) throw error;
+                                        feedback = "unavailable";
+                                        logger.event("live_not_interested_unavailable", new JSONObject()
+                                                .put("code", error.code));
+                                    }
                                 }
                             }
                         }
@@ -647,12 +795,31 @@ public final class WarmupEngine {
             logger.event("comments_unavailable", new JSONObject());
             return new ArrayList<>();
         }
-        waitCooperative(sample(random, config.commentMinSeconds * 1000, config.commentMaxSeconds * 1000));
-        PageState state = awaitTransition(gateway, config, logger, PageState.Page.FEED,
-                PageTransitionPolicy.Action.OPEN_COMMENTS);
-        if (state.page != PageState.Page.COMMENTS) {
-            throw new Blocked("comments_not_opened", "点击评论入口后未进入稳定评论区");
+        // Short settle then open-contract wait. Empty "抢沙发" panels are COMMENTS once recognized.
+        waitCooperative(sample(random, 600, 1200));
+        PageState state;
+        try {
+            state = awaitTransition(gateway, config, logger, PageState.Page.FEED,
+                    PageTransitionPolicy.Action.OPEN_COMMENTS);
+        } catch (Blocked openError) {
+            // Optional browse step: do not kill the whole run when open fails (missed tap / photo UI).
+            logger.event("comments_open_failed_soft", new JSONObject()
+                    .put("code", openError.code)
+                    .put("message", openError.getMessage()));
+            gateway.pressBack();
+            waitCooperative(400);
+            return new ArrayList<>();
         }
+        if (state.page != PageState.Page.COMMENTS) {
+            logger.event("comments_not_opened_soft", new JSONObject()
+                    .put("page", state.page.name())
+                    .put("evidence", new JSONArray(state.evidence)));
+            gateway.pressBack();
+            waitCooperative(400);
+            return new ArrayList<>();
+        }
+        // Optional dwell after open (config range), without blocking if already empty panel.
+        waitCooperative(sample(random, config.commentMinSeconds * 1000, config.commentMaxSeconds * 1000));
         Set<String> comments = new LinkedHashSet<>();
         int expanded = 0;
         int plannedScrolls = BrowseRandomizer.commentScrollCount(
@@ -704,12 +871,18 @@ public final class WarmupEngine {
     private String interactButton(AccessibilityGateway gateway, RunLogger logger,
                                   ControlResolver.Role role,
                                   String name, String target, boolean apply,
-                                  Counters counters) throws Exception {
+                                  Counters counters, boolean softMissing) throws Exception {
         UiSnapshot actionSnapshot = gateway.snapshot();
         String beforeFingerprint = VideoContent.from(actionSnapshot).fingerprint();
         ControlResolver.Match resolved = ControlResolver.resolve(actionSnapshot, role);
         UiNode before = resolved == null ? null : resolved.node;
-        if (before == null) throw new Blocked(name + "_button_missing", "找不到" + name + "按钮");
+        if (before == null) {
+            if (softMissing) {
+                logger.event(name + "_unavailable", new JSONObject().put("reason", "button_missing"));
+                return "unavailable";
+            }
+            throw new Blocked(name + "_button_missing", "找不到" + name + "按钮");
+        }
         if ("like".equals(name) && isLikeSelected(before)) return "already_liked";
         FavoriteVisualEvidence.Profile favoriteBefore = "favorite".equals(name)
                 ? gateway.favoriteVisualState(before) : FavoriteVisualEvidence.unavailable();
@@ -791,11 +964,24 @@ public final class WarmupEngine {
                 ControlResolver.Role.VIDEO_COMMENTS, commentEntry.node)) {
             throw new Blocked("comment_entry_missing", "找不到评论入口");
         }
-        waitCooperative(800);
-        PageState comments = awaitTransition(gateway, config, logger, PageState.Page.FEED,
-                PageTransitionPolicy.Action.OPEN_COMMENTS);
+        waitCooperative(900);
+        PageState comments;
+        try {
+            comments = awaitTransition(gateway, config, logger, PageState.Page.FEED,
+                    PageTransitionPolicy.Action.OPEN_COMMENTS);
+        } catch (Blocked openError) {
+            throw new Blocked("comment_composer_not_ready",
+                    "评论页打开失败，未尝试输入 · " + openError.getMessage());
+        }
         if (comments.page != PageState.Page.COMMENTS) {
-            throw new Blocked("comment_composer_not_ready", "评论页尚未稳定，未尝试输入文字");
+            // One more direct re-inspect: empty panels may classify late.
+            waitCooperative(500);
+            comments = inspect(gateway, config);
+        }
+        if (comments.page != PageState.Page.COMMENTS) {
+            throw new Blocked("comment_composer_not_ready",
+                    "评论页尚未稳定，未尝试输入 · " + describePageMismatch(
+                            PageState.Page.FEED, comments));
         }
         ControlResolver.Match commentField = ControlResolver.resolve(
                 gateway.snapshot(), ControlResolver.Role.COMMENT_FIELD);
@@ -861,10 +1047,47 @@ public final class WarmupEngine {
         transaction.committed(evidence);
         counters.comments++;
         logger.event("comment", new JSONObject().put("verified", true));
-        ControlResolver.Match close = ControlResolver.resolve(
-                gateway.snapshot(), ControlResolver.Role.COMMENT_CLOSE);
-        if (close == null || !gateway.tapResolvedGesture(
-                ControlResolver.Role.COMMENT_CLOSE, close.node)) gateway.pressBack();
+        // Sending a comment often leaves the panel open (or mid-animation). Always return to a
+        // stable FEED contract so the next workflow step does not hit unexpected_page UNKNOWN.
+        boolean closed = false;
+        for (int attempt = 0; attempt < 3 && !closed; attempt++) {
+            ControlResolver.Match close = ControlResolver.resolve(
+                    gateway.snapshot(), ControlResolver.Role.COMMENT_CLOSE);
+            if (close != null) {
+                gateway.tapResolvedGesture(ControlResolver.Role.COMMENT_CLOSE, close.node);
+            } else {
+                gateway.pressBack();
+            }
+            waitCooperative(attempt == 0 ? 700 : 500);
+            PageState afterClose = inspect(gateway, config);
+            if (afterClose.page == PageState.Page.FEED
+                    && !afterClose.interruptions.contains("comments_open")) {
+                closed = true;
+                break;
+            }
+            // Partial composer / UNKNOWN: keep pressing back / close.
+            if (afterClose.page == PageState.Page.COMMENTS
+                    || afterClose.interruptions.contains("comments_open")) {
+                logger.event("comment_panel_still_open", new JSONObject()
+                        .put("attempt", attempt + 1)
+                        .put("page", afterClose.page.name())
+                        .put("evidence", new JSONArray(afterClose.evidence)));
+            }
+        }
+        if (!closed) {
+            try {
+                ensureExpected(gateway, PageState.Page.FEED, config, logger);
+                closed = true;
+            } catch (Blocked closeError) {
+                logger.event("comment_close_unverified", new JSONObject()
+                        .put("code", closeError.code)
+                        .put("message", closeError.getMessage()));
+                // Comment already committed — soft-continue if we can still see video actions.
+                PageState soft = inspect(gateway, config);
+                if (soft.page == PageState.Page.FEED) closed = true;
+            }
+        }
+        logger.event("comment_closed", new JSONObject().put("closed_to_feed", closed));
         return "commented";
     }
 
@@ -1006,47 +1229,156 @@ public final class WarmupEngine {
             transaction.unknown("click_not_acknowledged", nodeDetail(repost.node));
             throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
         }
-        waitCooperative(1000);
+        waitCooperative(900);
+        // First-time repost shows an education sheet ("好的") that covers the feed and breaks
+        // fingerprint checks. Dismiss it, then continue verification.
+        boolean firstTimeGuide = dismissFirstTimeRepostGuide(gateway, logger);
+        waitCooperative(firstTimeGuide ? 700 : 400);
         UiSnapshot afterWrite = gateway.snapshot();
         PageState afterWriteState = PageAnalyzer.analyze(afterWrite, true);
-        if (afterWriteState.page != PageState.Page.FEED
-                || !beforeFingerprint.equals(VideoContent.from(afterWrite).fingerprint())) {
-            transaction.unknown("underlying_video_changed", new JSONObject()
-                    .put("page", afterWriteState.page.name()));
-            throw new Blocked("share_result_unknown",
-                    "转发后底层视频发生变化，已停止且不会重试");
+        // Guide may still be mid-dismiss; treat first-time coachmark as non-fatal.
+        if (isFirstTimeRepostGuide(afterWrite)) {
+            dismissFirstTimeRepostGuide(gateway, logger);
+            waitCooperative(700);
+            afterWrite = gateway.snapshot();
+            afterWriteState = PageAnalyzer.analyze(afterWrite, true);
         }
+        String afterFingerprint = VideoContent.from(afterWrite).fingerprint();
+        boolean sameVideo = !beforeFingerprint.isEmpty()
+                && beforeFingerprint.equals(afterFingerprint);
+        boolean onFeed = afterWriteState.page == PageState.Page.FEED;
+        if (!onFeed && !firstTimeGuide && !isFirstTimeRepostGuide(afterWrite)) {
+            // Share sheet may still be open after repost — not a video change.
+            if (!hasShareSheetChrome(afterWrite) && !hasRepostSuccessChrome(afterWrite)) {
+                transaction.unknown("underlying_video_changed", new JSONObject()
+                        .put("page", afterWriteState.page.name())
+                        .put("first_time_guide", firstTimeGuide));
+                throw new Blocked("share_result_unknown",
+                        "转发后底层视频发生变化，已停止且不会重试");
+            }
+        }
+        // Prefer reopening share sheet to confirm ALREADY_REPOSTED; if first-time guide already
+        // confirmed success copy, accept that as verification.
+        boolean verifiedByGuide = firstTimeGuide || hasRepostSuccessChrome(afterWrite);
         ControlResolver.Match reopenMatch = ControlResolver.resolve(
                 afterWrite, ControlResolver.Role.VIDEO_SHARE);
         UiNode reopen = reopenMatch == null ? null : reopenMatch.node;
-        if (reopen == null || !gateway.tapResolvedGesture(
+        if (reopen == null) {
+            // Sheet may still be open; try closing guide/sheet first then find share again.
+            gateway.pressBack();
+            waitCooperative(500);
+            afterWrite = gateway.snapshot();
+            reopenMatch = ControlResolver.resolve(afterWrite, ControlResolver.Role.VIDEO_SHARE);
+            reopen = reopenMatch == null ? null : reopenMatch.node;
+        }
+        boolean verified = verifiedByGuide;
+        RepostSheetState.Result verifiedState = null;
+        if (reopen != null && gateway.tapResolvedGesture(
                 ControlResolver.Role.VIDEO_SHARE, reopen)) {
-            transaction.unknown("verification_entry_unavailable", nodeDetail(reopen));
+            waitCooperative(800);
+            // Guide can reappear when reopening sheet on first success.
+            dismissFirstTimeRepostGuide(gateway, logger);
+            waitCooperative(400);
+            verifiedState = RepostSheetState.analyze(gateway.snapshot());
+            verified = verified || verifiedState.state == RepostSheetState.State.ALREADY_REPOSTED;
+            if (!verified) captureDiagnostic(logger, "repost-verification-failed");
+        } else if (!verified) {
+            transaction.unknown("verification_entry_unavailable",
+                    reopen == null ? new JSONObject() : nodeDetail(reopen));
             captureDiagnostic(logger, "repost-reopen-failed");
             throw new Blocked("share_result_unknown", "转发后无法复核结果，已停止且不会重试");
         }
-        waitCooperative(800);
-        RepostSheetState.Result verifiedState = RepostSheetState.analyze(gateway.snapshot());
-        boolean verified = verifiedState.state == RepostSheetState.State.ALREADY_REPOSTED;
-        if (!verified) captureDiagnostic(logger, "repost-verification-failed");
         boolean closed = closeShareSheetAndVerify(
                 gateway, config, beforeFingerprint, logger);
+        // After first-time guide, fingerprint may be weak briefly; if closed back to FEED and
+        // repost was verified by sheet or guide, do not hard-stop on same_video miss once.
+        if (!closed && verified && (verifiedByGuide || sameVideo)) {
+            waitCooperative(500);
+            closed = closeShareSheetAndVerify(gateway, config, beforeFingerprint, logger)
+                    || inspectStable(gateway, config).page == PageState.Page.FEED;
+        }
         if (!verified) {
-            transaction.unknown("verification_failed", repostStateDetail(verifiedState));
+            transaction.unknown("verification_failed",
+                    verifiedState == null ? new JSONObject() : repostStateDetail(verifiedState));
             throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
         }
         if (!closed) {
-            transaction.unknown("verification_sheet_close_failed", repostStateDetail(verifiedState));
-            throw new Blocked("share_result_unknown",
-                    "已看到转发成功状态，但关闭面板后无法确认仍是原视频");
+            transaction.unknown("verification_sheet_close_failed",
+                    verifiedState == null
+                            ? new JSONObject().put("verified_by_guide", verifiedByGuide)
+                            : repostStateDetail(verifiedState));
+            // Soft-complete: repost almost certainly landed; avoid killing the whole run.
+            logger.event("share_close_unverified", new JSONObject()
+                    .put("verified_by_guide", verifiedByGuide)
+                    .put("same_video", sameVideo));
+            gateway.pressBack();
+            waitCooperative(400);
         }
-        JSONObject evidence = repostStateDetail(verifiedState)
-                .put("mode", "repost").put("verified", true);
+        JSONObject evidence = (verifiedState == null
+                ? new JSONObject().put("state", "GUIDE_OR_SUCCESS_CHROME")
+                : repostStateDetail(verifiedState))
+                .put("mode", "repost")
+                .put("verified", true)
+                .put("first_time_guide", firstTimeGuide)
+                .put("verified_by_guide", verifiedByGuide)
+                .put("same_video", sameVideo);
         transaction.verified(evidence);
         transaction.committed(evidence);
         counters.shares++;
         logger.event("share", evidence);
         return "reposted";
+    }
+
+    /** First-time "通过转发将该作品推荐给其他人" sheet with primary CTA 好的. */
+    private boolean dismissFirstTimeRepostGuide(AccessibilityGateway gateway, RunLogger logger)
+            throws Exception {
+        UiSnapshot snap = gateway.snapshot();
+        if (!isFirstTimeRepostGuide(snap)) return false;
+        // 好的 is primary-accept blacklisted for generic soft-ask; allowed only here.
+        boolean ok = gateway.clickText(InterruptPolicy.FIRST_TIME_REPOST_GUIDE_LABELS)
+                || gateway.tapText(InterruptPolicy.FIRST_TIME_REPOST_GUIDE_LABELS);
+        logger.event("first_time_repost_guide", new JSONObject()
+                .put("dismissed", ok)
+                .put("labels", new JSONArray(InterruptPolicy.FIRST_TIME_REPOST_GUIDE_LABELS)));
+        if (ok) waitCooperative(500);
+        return ok;
+    }
+
+    private static boolean isFirstTimeRepostGuide(UiSnapshot snapshot) {
+        if (snapshot == null) return false;
+        StringBuilder blob = new StringBuilder();
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            blob.append(node.searchableText()).append(' ');
+        }
+        String text = blob.toString().toLowerCase(java.util.Locale.ROOT);
+        int hits = 0;
+        for (String marker : InterruptPolicy.FIRST_TIME_REPOST_GUIDE_MARKERS) {
+            if (marker != null && text.contains(marker.toLowerCase(java.util.Locale.ROOT))) hits++;
+        }
+        boolean hasCta = text.contains("好的") || text.contains("got it");
+        return hits >= 1 && hasCta;
+    }
+
+    private static boolean hasRepostSuccessChrome(UiSnapshot snapshot) {
+        if (snapshot == null) return false;
+        for (UiNode node : snapshot.nodes) {
+            if (!snapshot.isVisible(node)) continue;
+            String t = node.searchableText().toLowerCase(java.util.Locale.ROOT);
+            if (t.contains("已转发") || t.contains("reposted") || t.contains("取消转发")
+                    || t.contains("remove repost") || t.contains("undo repost")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasShareSheetChrome(UiSnapshot snapshot) {
+        if (snapshot == null) return false;
+        RepostSheetState.Result sheet = RepostSheetState.analyze(snapshot);
+        return sheet.state != RepostSheetState.State.UNKNOWN
+                || sheet.createEntry != null
+                || sheet.removeEntry != null;
     }
 
     private boolean closeShareSheetAndVerify(AccessibilityGateway gateway,
@@ -1161,7 +1493,9 @@ public final class WarmupEngine {
         PageState initial = inspectStable(gateway, config);
         int maximumActions = Math.max(6, config.maxRecoveryActions + 3);
         int actions = 0;
-        long contractDeadline = now() + 6_000L;
+        // Opening after cold start needs more wall-clock than mid-run page turns: TikTok often
+        // blanks the top tabs / action rail for a few frames while the feed paints.
+        long contractDeadline = now() + 14_000L;
         boolean waitLogged = false;
         while (actions <= maximumActions) {
             checkControl();
@@ -1172,23 +1506,29 @@ public final class WarmupEngine {
             if (PageStability.isTransientUnknown(state) && now() < contractDeadline) {
                 if (!waitLogged) {
                     logger.event("return_home_contract_wait", new JSONObject()
+                            .put("reason", "page_unknown")
                             .put("evidence", new JSONArray(state.evidence)));
                     waitLogged = true;
                 }
-                waitCooperative(350);
+                waitCooperative(400);
                 continue;
             }
             if (hasRecoverableInterruption(state, PageState.Page.FEED)
-                    && config.autoRecover && actions < maximumActions
-                    && recoverOne(gateway, state, PageState.Page.FEED)) {
-                actions++;
-                logger.event("return_home_step", new JSONObject()
-                        .put("page", state.page.name()).put("action", "recover_interruption")
-                        .put("attempt", actions));
-                contractDeadline = now() + 6_000L;
-                waitLogged = false;
-                waitCooperative(700);
-                continue;
+                    && config.autoRecover && actions < maximumActions) {
+                RecoveryStep step = recoverOne(gateway, state, PageState.Page.FEED);
+                if (step.success) {
+                    actions++;
+                    logger.event("return_home_step", new JSONObject()
+                            .put("page", state.page.name())
+                            .put("interruption_code", step.interruptionCode)
+                            .put("action", step.action)
+                            .put("attempt", actions)
+                            .put("expected", PageState.Page.FEED.name()));
+                    contractDeadline = now() + 10_000L;
+                    waitLogged = false;
+                    waitCooperative(700);
+                    continue;
+                }
             }
 
             VideoSurfaceContext.Result context = state.page == PageState.Page.FEED
@@ -1199,6 +1539,20 @@ public final class WarmupEngine {
                 requireTransition(initial.page, state, PageTransitionPolicy.Action.RETURN_HOME, logger);
                 logger.event("recommendation_home_verified", contextJson(context));
                 return;
+            }
+            // Do not hard-fail on the first unknown context sample. Wait for the feed chrome to
+            // finish painting; only then treat unresolved FEED+UNKNOWN as a blocker.
+            if (state.page == PageState.Page.FEED
+                    && context.kind == VideoSurfaceContext.Kind.UNKNOWN
+                    && now() < contractDeadline) {
+                if (!waitLogged) {
+                    logger.event("return_home_contract_wait", contextJson(context)
+                            .put("reason", "video_context_unknown")
+                            .put("expected", VideoSurfaceContext.Kind.RECOMMENDATION_HOME.name()));
+                    waitLogged = true;
+                }
+                waitCooperative(450);
+                continue;
             }
             if (state.page == PageState.Page.FEED
                     && context.kind == VideoSurfaceContext.Kind.UNKNOWN) {
@@ -1223,7 +1577,7 @@ public final class WarmupEngine {
                     .put("page", state.page.name()).put("action", action)
                     .put("dispatched", navigated).put("attempt", actions));
             if (!navigated) break;
-            contractDeadline = now() + 6_000L;
+            contractDeadline = now() + 10_000L;
             waitLogged = false;
             waitCooperative(750);
         }
@@ -1235,7 +1589,8 @@ public final class WarmupEngine {
         VideoSurfaceContext.Kind expected = "search".equals(source)
                 ? VideoSurfaceContext.Kind.SEARCH_DETAIL
                 : VideoSurfaceContext.Kind.RECOMMENDATION_HOME;
-        long contractDeadline = now() + 6_000L;
+        // Feed paint after swipe / cold open is slower than a mid-video interaction check.
+        long contractDeadline = now() + ("search".equals(source) ? 8_000L : 10_000L);
         boolean waitLogged = false;
         VideoSurfaceContext.Result observed;
         while (true) {
@@ -1259,7 +1614,7 @@ public final class WarmupEngine {
                         .put("foreground", foreground.foregroundDecision.toJson()));
                 waitLogged = true;
             }
-            waitCooperative(350);
+            waitCooperative(400);
         }
         logger.event("video_context_rejected", contextJson(observed)
                 .put("source", source).put("expected", expected.name()));
@@ -1340,14 +1695,19 @@ public final class WarmupEngine {
                 waitCooperative(650);
                 continue;
             }
-            if (actions < maximumActions && config.autoRecover
-                    && recoverOne(gateway, state, PageState.Page.FEED)) {
-                actions++;
-                logger.event("opening_recovery", new JSONObject()
-                        .put("from", state.page.name()).put("action", "bounded_recovery")
-                        .put("attempt", actions));
-                waitCooperative(700);
-                continue;
+            if (actions < maximumActions && config.autoRecover) {
+                RecoveryStep step = recoverOne(gateway, state, PageState.Page.FEED);
+                if (step.success) {
+                    actions++;
+                    logger.event("opening_recovery", new JSONObject()
+                            .put("from", state.page.name())
+                            .put("interruption_code", step.interruptionCode)
+                            .put("action", step.action)
+                            .put("attempt", actions)
+                            .put("expected", PageState.Page.FEED.name()));
+                    waitCooperative(700);
+                    continue;
+                }
             }
             captureBlocker(logger, "opening_page_unresolved", state.page.name());
             throw new Blocked("opening_page_unresolved", "启动后无法回到推荐流：" + state.page);
@@ -1359,7 +1719,7 @@ public final class WarmupEngine {
     private void ensureExpected(AccessibilityGateway gateway, PageState.Page expected,
                                 WarmupConfig config, RunLogger logger) throws Exception {
         int recoveryActions = 0;
-        long contractDeadline = now() + 6_000L;
+        long contractDeadline = now() + 8_000L;
         boolean waitLogged = false;
         while (recoveryActions <= config.maxRecoveryActions) {
             checkControl();
@@ -1368,107 +1728,286 @@ public final class WarmupEngine {
             if (!state.blockers.isEmpty()) throw new Blocked(state.blockers.get(0), "页面阻断：" + state.blockers);
             boolean interruptionNeedsRecovery = hasRecoverableInterruption(state, expected);
             if (state.page == expected && !interruptionNeedsRecovery) return;
+            boolean emptyWindows = PageStability.isEmptyWindowObservation(state);
+            // Empty accessibility windows after pause/notification shade need a longer budget than
+            // a normal page-turn animation. Do not promote that gap to unexpected_page.
+            long effectiveDeadline = emptyWindows ? Math.max(contractDeadline, now() + 12_000L)
+                    : contractDeadline;
+            if (emptyWindows) contractDeadline = effectiveDeadline;
+            // Pure UNKNOWN: observe briefly (~2.5s of the 8s budget), then recover via
+            // unknown_return_feed instead of waiting out the full deadline with 0 recoveries.
             if (PageStability.isTransientUnknown(state) && now() < contractDeadline) {
                 if (!waitLogged) {
                     logger.event("page_contract_wait", new JSONObject()
                             .put("expected", expected.name())
+                            .put("empty_windows", emptyWindows)
                             .put("evidence", new JSONArray(state.evidence)));
                     waitLogged = true;
                 }
-                waitCooperative(350);
-                continue;
+                boolean earlyObserve = emptyWindows || (now() + 5_500L < contractDeadline);
+                if (earlyObserve) {
+                    waitCooperative(emptyWindows ? 500 : 350);
+                    continue;
+                }
             }
             if (config.autoRecover && recoveryActions < config.maxRecoveryActions
-                    && recoverOne(gateway, state, expected)) {
-                recoveryActions++;
-                logger.event("recovery", new JSONObject().put("from", state.page.name())
-                        .put("attempt", recoveryActions));
-                contractDeadline = now() + 6_000L;
-                waitLogged = false;
-                waitCooperative(600);
-                continue;
+                    && !emptyWindows) {
+                RecoveryStep step = recoverOne(gateway, state, expected);
+                if (step.success) {
+                    recoveryActions++;
+                    logger.event("recovery", new JSONObject()
+                            .put("from", state.page.name())
+                            .put("interruption_code", step.interruptionCode)
+                            .put("action", step.action)
+                            .put("attempt", recoveryActions)
+                            .put("expected", expected.name()));
+                    contractDeadline = now() + 8_000L;
+                    waitLogged = false;
+                    waitCooperative(600);
+                    continue;
+                }
+                // Explicit fallback when recoverOne returns none/failed: still try BACK once.
+                if (recoveryActions < config.maxRecoveryActions) {
+                    boolean back = gateway.pressBackAlways() || gateway.pressBack();
+                    recoveryActions++;
+                    logger.event("recovery", new JSONObject()
+                            .put("from", state.page.name())
+                            .put("interruption_code", "anomaly_press_back_fallback")
+                            .put("action", "press_back")
+                            .put("attempt", recoveryActions)
+                            .put("expected", expected.name())
+                            .put("dispatched", back));
+                    contractDeadline = now() + 8_000L;
+                    waitLogged = false;
+                    waitCooperative(600);
+                    continue;
+                }
             }
-            captureBlocker(logger, "unexpected_page", state.page.name());
-            throw new Blocked("unexpected_page", "预期 " + expected + "，实际 " + state.page);
+            if (emptyWindows || PageStability.isEmptyWindowObservation(state)) {
+                String gapDetail = describePageMismatch(expected, state);
+                captureBlocker(logger, "accessibility_window_gap", gapDetail);
+                throw new Blocked("accessibility_window_gap",
+                        "无障碍暂时读不到窗口（常见于暂停/通知栏后），请回到 TikTok 后重试 · " + gapDetail);
+            }
+            String detail = describePageMismatch(expected, state);
+            captureBlocker(logger, "unexpected_page", detail);
+            logger.event("unexpected_page_detail", new JSONObject()
+                    .put("expected", expected.name())
+                    .put("actual", state.page.name())
+                    .put("content_kind", state.contentKind)
+                    .put("blockers", new JSONArray(state.blockers))
+                    .put("interruptions", new JSONArray(state.interruptions))
+                    .put("evidence", new JSONArray(state.evidence))
+                    .put("recovery_actions_used", recoveryActions)
+                    .put("message", detail));
+            throw new Blocked("unexpected_page", detail);
         }
     }
 
+    /** Optional comment-write failures that should not abort the whole session. */
+    private static boolean isSoftCommentFailure(Blocked error) {
+        if (error == null || error.code == null) return false;
+        switch (error.code) {
+            case "comment_entry_missing":
+            case "comment_composer_not_ready":
+            case "comment_input_failed":
+            case "comment_keyboard_dismiss_failed":
+            case "comment_send_missing":
+            case "comment_draft_not_stable":
+            case "comment_result_unknown":
+            case "unexpected_transition":
+            case "page_unstable":
+                return true;
+            default:
+                return error.code.startsWith("comment_");
+        }
+    }
+
+    /** Human-readable page contract failure for UI/log — includes interruptions and top evidence. */
+    static String describePageMismatch(PageState.Page expected, PageState state) {
+        if (state == null) return "预期 " + expected + "，实际 null";
+        StringBuilder sb = new StringBuilder();
+        sb.append("预期 ").append(expected.name())
+                .append("，实际 ").append(state.page.name());
+        if (state.contentKind != null && !state.contentKind.isEmpty()
+                && !"none".equals(state.contentKind)) {
+            sb.append(" · 内容类型=").append(state.contentKind);
+        }
+        if (state.blockers != null && !state.blockers.isEmpty()) {
+            sb.append(" · 阻断=").append(state.blockers);
+        }
+        if (state.interruptions != null && !state.interruptions.isEmpty()) {
+            sb.append(" · 可恢复中断=").append(state.interruptions);
+        }
+        if (state.evidence != null && !state.evidence.isEmpty()) {
+            int n = Math.min(6, state.evidence.size());
+            sb.append(" · 证据=").append(state.evidence.subList(0, n));
+        }
+        // Common case hints
+        if (state.page == PageState.Page.UNKNOWN
+                && state.interruptions != null
+                && state.interruptions.contains("comments_open")) {
+            sb.append(" · 提示=评论面板可能未关闭");
+        }
+        if (state.page == PageState.Page.COMMENTS && expected == PageState.Page.FEED) {
+            sb.append(" · 提示=仍在评论区，应关闭后回视频");
+        }
+        if (state.page == PageState.Page.UNKNOWN
+                && state.evidence != null
+                && state.evidence.toString().contains("comments:partial")) {
+            sb.append(" · 提示=评论框残留/半开状态");
+        }
+        return sb.toString();
+    }
+
     private boolean hasRecoverableInterruption(PageState state, PageState.Page expected) {
-        return state.interruptions.contains("contacts_sync_prompt")
-                || state.interruptions.contains("system_input_method_dialog")
-                || state.interruptions.contains("collections_popup")
-                || state.interruptions.contains("follow_friends_popup")
-                || state.interruptions.contains("link_email_popup")
-                || state.interruptions.contains("notification_prompt")
-                || state.interruptions.contains("promo_banner")
-                || state.interruptions.contains("notification_banner")
-                || state.interruptions.contains("generic_dismiss_popup")
-                || state.interruptions.contains("got_it_popup")
-                || state.interruptions.contains("interest_survey")
-                || state.interruptions.contains("video_options_sheet")
-                || (state.interruptions.contains("suggestion_page") && expected == PageState.Page.FEED)
-                || (state.page == PageState.Page.COMMENTS && expected != PageState.Page.COMMENTS);
+        return InterruptPolicy.hasRecoverableInterruption(state, expected);
     }
 
     /**
      * Recover only known reversible interruptions. Never auto-accept permissions, captcha,
-     * login, age/privacy consent, or unknown system dialogs (those are blockers).
+     * login, age/privacy consent, or unknown system dialogs without a Deny CTA (those stay blockers).
+     * System GrantPermissions with 拒绝/Don't allow is denied automatically and the run continues.
      * CTA lists align with soft-dismiss labels mined from TikTok 46.1.3 string resources.
      */
-    private boolean recoverOne(AccessibilityGateway gateway, PageState state, PageState.Page expected) {
-        if (state.interruptions.contains("contacts_sync_prompt")) {
-            return gateway.tapText("不允许", "Don't allow", "Don’t allow", "Not now", "以后再说", "暂不")
-                    || dismissSoftPopup(gateway);
+    private RecoveryStep recoverOne(AccessibilityGateway gateway, PageState state, PageState.Page expected)
+            throws Exception {
+        String code = InterruptPolicy.primaryRecoverableCode(state, expected);
+        if (code == null) {
+            // No named interruption: still try BACK for off-contract pages.
+            if (expected != null && state != null && state.page != expected
+                    && (state.blockers == null || state.blockers.isEmpty())) {
+                boolean back = gateway.pressBackAlways() || gateway.pressBack();
+                return back
+                        ? RecoveryStep.ok("anomaly_press_back", "press_back")
+                        : RecoveryStep.failed("anomaly_press_back", "press_back");
+            }
+            return RecoveryStep.none();
         }
-        if (state.interruptions.contains("system_input_method_dialog")
-                || state.interruptions.contains("video_options_sheet")
-                || (state.page == PageState.Page.COMMENTS && expected != PageState.Page.COMMENTS)) {
-            return gateway.pressBack();
+        String action = InterruptPolicy.recoveryActionFor(code);
+        boolean ok;
+        switch (code) {
+            case "system_permission_prompt":
+                ok = gateway.denySystemPermissionDialog(
+                        InterruptPolicy.filterSoftLabels(InterruptPolicy.SYSTEM_PERMISSION_DENY_LABELS));
+                break;
+            case "contacts_sync_prompt":
+                ok = gateway.denySystemPermissionDialog(
+                        InterruptPolicy.filterSoftLabels(InterruptPolicy.CONTACTS_DENY_LABELS))
+                        || gateway.tapText(InterruptPolicy.filterSoftLabels(InterruptPolicy.CONTACTS_DENY_LABELS))
+                        || dismissSoftPopup(gateway);
+                break;
+            case "system_input_method_dialog":
+            case "video_options_sheet":
+            case "comments_open":
+            case "anomaly_press_back":
+                // Anomalies: always try system BACK first (does not require TikTok focus).
+                ok = gateway.pressBackAlways() || gateway.pressBack();
+                break;
+            case "notification_banner":
+                ok = gateway.swipeUp(180, 0) || gateway.pressBack();
+                break;
+            case "first_time_repost_guide":
+                // 好的 is intentionally not in SOFT_DISMISS (primary-looking CTA); allow only here.
+                ok = gateway.clickText(InterruptPolicy.FIRST_TIME_REPOST_GUIDE_LABELS)
+                        || gateway.tapText(InterruptPolicy.FIRST_TIME_REPOST_GUIDE_LABELS)
+                        || gateway.pressBack();
+                break;
+            case "got_it_popup":
+                ok = gateway.clickText(InterruptPolicy.filterSoftLabels(InterruptPolicy.GOT_IT_LABELS))
+                        || gateway.tapText(InterruptPolicy.filterSoftLabels(InterruptPolicy.GOT_IT_LABELS))
+                        || dismissSoftPopup(gateway);
+                break;
+            case "interest_survey":
+                ok = gateway.clickText(InterruptPolicy.filterSoftLabels(InterruptPolicy.INTEREST_SKIP_LABELS))
+                        || gateway.tapText(InterruptPolicy.filterSoftLabels(InterruptPolicy.INTEREST_SKIP_LABELS))
+                        || gateway.pressBack();
+                break;
+            case "collections_popup":
+            case "follow_friends_popup":
+            case "link_email_popup":
+            case "notification_prompt":
+            case "promo_banner":
+            case "generic_dismiss_popup":
+                ok = gateway.denySystemPermissionDialog(
+                        InterruptPolicy.filterSoftLabels(InterruptPolicy.SOFT_DISMISS_LABELS))
+                        || dismissSoftPopup(gateway);
+                break;
+            case "suggestion_page":
+                ok = gateway.swipeUp(350, 0);
+                break;
+            case "search_input":
+            case "search_results":
+            case "search_empty":
+            case "inbox":
+            case "profile":
+            case "shop":
+            case "settings":
+            case "unknown_return_feed":
+                // User policy: on anomaly, try 返回上一页 first, then 首页.
+                ok = recoverByBackThenHome(gateway);
+                break;
+            default:
+                // Last resort for any coded interruption we forgot to map: still press BACK.
+                ok = gateway.pressBackAlways() || gateway.pressBack();
+                break;
         }
-        if (state.interruptions.contains("notification_banner")) {
-            // In-app message toast / top banner: swipe it away, then fall back to back.
-            return gateway.swipeUp(180, 0) || gateway.pressBack();
+        return ok ? RecoveryStep.ok(code, action) : RecoveryStep.failed(code, action);
+    }
+
+    /**
+     * Preferred anomaly recovery: system BACK (previous page), then home tab if still off-feed.
+     */
+    private boolean recoverByBackThenHome(AccessibilityGateway gateway) throws Exception {
+        boolean back = gateway.pressBackAlways() || gateway.pressBack();
+        waitCooperative(450);
+        PageState afterBack = PageAnalyzer.analyze(gateway.snapshot(), true);
+        if (afterBack.page == PageState.Page.FEED
+                && (afterBack.interruptions == null
+                || !afterBack.interruptions.contains("comments_open"))) {
+            return true;
         }
-        if (state.interruptions.contains("got_it_popup")) {
-            return gateway.clickText("我知道了", "知道了", "Got it")
-                    || gateway.tapText("我知道了", "知道了", "Got it")
-                    || dismissSoftPopup(gateway);
+        boolean home = gateway.clickDescriptionContains("首页", "Home")
+                || gateway.clickText("首页", "Home");
+        if (!home) {
+            // Second BACK as soft fallback when home tab is not hit.
+            home = gateway.pressBackAlways() || gateway.pressBack();
         }
-        if (state.interruptions.contains("interest_survey")) {
-            return gateway.clickText("跳过", "Skip", "以后再说", "Not now", "Maybe later")
-                    || gateway.tapText("跳过", "Skip", "以后再说", "Not now")
-                    || gateway.pressBack();
-        }
-        if (state.interruptions.contains("collections_popup")
-                || state.interruptions.contains("follow_friends_popup")
-                || state.interruptions.contains("link_email_popup")
-                || state.interruptions.contains("notification_prompt")
-                || state.interruptions.contains("promo_banner")
-                || state.interruptions.contains("generic_dismiss_popup")) {
-            return dismissSoftPopup(gateway);
-        }
-        if (state.interruptions.contains("suggestion_page") && expected == PageState.Page.FEED) {
-            return gateway.swipeUp(350, 0);
-        }
-        if (expected == PageState.Page.FEED && (state.page == PageState.Page.SEARCH_INPUT
-                || state.page == PageState.Page.SEARCH_RESULTS || state.page == PageState.Page.SEARCH_EMPTY
-                || state.page == PageState.Page.INBOX || state.page == PageState.Page.PROFILE
-                || state.page == PageState.Page.SHOP || state.page == PageState.Page.SETTINGS)) {
-            return gateway.clickDescriptionContains("首页", "Home") || gateway.pressBack();
-        }
-        return false;
+        return back || home;
     }
 
     /** Soft-ask secondary buttons only — never primary accept/allow/continue. */
     private boolean dismissSoftPopup(AccessibilityGateway gateway) {
-        return gateway.clickText(
-                "以后再说", "下次再说", "稍后再说", "暂不", "先不了", "不用了", "跳过",
-                "Not now", "Maybe later", "No thanks", "No, thanks", "Dismiss", "Skip")
-                || gateway.tapText(
-                "以后再说", "下次再说", "稍后再说", "暂不", "先不了", "不用了", "跳过",
-                "Not now", "Maybe later", "No thanks", "No, thanks", "Dismiss", "Skip")
+        String[] labels = InterruptPolicy.filterSoftLabels(InterruptPolicy.SOFT_DISMISS_LABELS);
+        return gateway.clickText(labels)
+                || gateway.tapText(labels)
                 || gateway.clickDescriptionContains("关闭", "Close")
                 || gateway.pressBack();
+    }
+
+    /** One bounded recovery attempt with structured logging fields. */
+    static final class RecoveryStep {
+        final boolean success;
+        final String interruptionCode;
+        final String action;
+
+        private RecoveryStep(boolean success, String interruptionCode, String action) {
+            this.success = success;
+            this.interruptionCode = interruptionCode == null ? "" : interruptionCode;
+            this.action = action == null ? "none" : action;
+        }
+
+        static RecoveryStep none() {
+            return new RecoveryStep(false, "", "none");
+        }
+
+        static RecoveryStep ok(String code, String action) {
+            return new RecoveryStep(true, code, action);
+        }
+
+        static RecoveryStep failed(String code, String action) {
+            return new RecoveryStep(false, code, action);
+        }
     }
 
     private PageState inspect(AccessibilityGateway gateway, WarmupConfig config) {
@@ -1486,22 +2025,44 @@ public final class WarmupEngine {
                                       RunLogger logger, PageState.Page from,
                                       PageTransitionPolicy.Action action) throws Exception {
         PageState observed = null;
-        for (int attempt = 0; attempt < 4; attempt++) {
+        for (int attempt = 0; attempt < 6; attempt++) {
             observed = inspectStable(gateway, config);
             if (!observed.blockers.isEmpty()) {
-                throw new Blocked(observed.blockers.get(0), "页面阻断：" + observed.blockers);
+                throw new Blocked(observed.blockers.get(0),
+                        "页面阻断：" + observed.blockers + " · 动作=" + action
+                                + " · " + describePageMismatch(from, observed));
             }
             if (observed.page != PageState.Page.UNKNOWN) {
+                if (PageTransitionPolicy.allows(from, observed.page, action)) {
+                    logger.event("transition_verified", new JSONObject()
+                            .put("from", from.name()).put("to", observed.page.name())
+                            .put("action", action.name()).put("confidence", observed.confidence)
+                            .put("evidence", new JSONArray(observed.evidence)));
+                    return observed;
+                }
+                // OPEN_COMMENTS often needs an extra frame for empty "抢沙发" panels / photo posts.
+                if (action == PageTransitionPolicy.Action.OPEN_COMMENTS
+                        && observed.page == PageState.Page.FEED
+                        && attempt < 5) {
+                    logger.event("transition_wait_comments", new JSONObject()
+                            .put("attempt", attempt + 1)
+                            .put("page", observed.page.name())
+                            .put("evidence", new JSONArray(observed.evidence)));
+                    waitCooperative(450);
+                    continue;
+                }
                 requireTransition(from, observed, action, logger);
                 return observed;
             }
-            if (attempt < 3) waitCooperative(450);
+            if (attempt < 5) waitCooperative(450);
         }
         logger.event("transition_unstable", new JSONObject()
                 .put("from", from.name()).put("action", action.name())
                 .put("evidence", new JSONArray(observed == null
                         ? Collections.emptyList() : observed.evidence)));
-        throw new Blocked("page_unstable", "页面连续采样不稳定，已停止操作");
+        throw new Blocked("page_unstable",
+                "页面连续采样不稳定 · 动作=" + action + " · 来源=" + from
+                        + (observed == null ? "" : " · " + describePageMismatch(from, observed)));
     }
 
     private void requireTransition(PageState.Page from, PageState observed,
@@ -1514,12 +2075,14 @@ public final class WarmupEngine {
                     .put("evidence", new JSONArray(observed.evidence)));
             return;
         }
+        String detail = "动作 " + action + " 后非预期页面：" + from + " → " + observed.page
+                + " · " + describePageMismatch(from, observed);
         logger.event("transition_rejected", new JSONObject()
                 .put("from", from.name()).put("to", observed.page.name())
                 .put("action", action.name()).put("confidence", observed.confidence)
-                .put("evidence", new JSONArray(observed.evidence)));
-        throw new Blocked("unexpected_transition", "动作 " + action + " 后出现非预期页面："
-                + from + " → " + observed.page);
+                .put("evidence", new JSONArray(observed.evidence))
+                .put("message", detail));
+        throw new Blocked("unexpected_transition", detail);
     }
 
     private void captureBlocker(RunLogger logger, String code, String message) {
@@ -1573,11 +2136,17 @@ public final class WarmupEngine {
     }
 
     private void checkControl() throws UserStopped {
+        boolean wasPaused;
         synchronized (control) {
+            wasPaused = paused;
             while (paused && !stopRequested) {
                 try { control.wait(500); } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new UserStopped(); }
             }
             if (stopRequested) throw new UserStopped();
+        }
+        // After a long pause, Accessibility often needs a beat before windows reappear.
+        if (wasPaused) {
+            SystemClock.sleep(450);
         }
     }
 

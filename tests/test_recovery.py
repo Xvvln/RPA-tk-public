@@ -1,5 +1,5 @@
 from rpa_tt.device import TIKTOK_PACKAGE
-from rpa_tt.recovery import plan_recovery
+from rpa_tt.recovery import plan_recovery, plan_recovery_steps
 from rpa_tt.state import detect_ui_state
 
 
@@ -74,6 +74,22 @@ def test_got_it_and_notification_prompt_are_recoverable() -> None:
     assert plan_recovery(got_it, "feed") == ["dismiss_got_it"]
     assert "dismiss_popup" in plan_recovery(notify, "feed")
     assert "notification_prompt" in notify.interruptions
+
+
+def test_contacts_sync_uses_deny_action_with_code() -> None:
+    state = detect_ui_state(
+        xml(node(text="同步手机通讯录好友"), node(text="不允许"), node(text="以后再说"))
+    )
+    assert "contacts_sync_prompt" in state.interruptions
+    steps = plan_recovery_steps(state, "feed")
+    assert steps[0].interruption_code == "contacts_sync_prompt"
+    assert steps[0].action == "deny_contacts"
+    assert plan_recovery(state, "feed")[0] == "deny_contacts"
+
+
+def test_blocker_plan_has_no_steps() -> None:
+    state = detect_ui_state(xml(node(text="请完成验证"), node(text="以后再说")))
+    assert plan_recovery_steps(state, "feed") == []
 
 
 def test_interest_survey_uses_skip_recovery() -> None:

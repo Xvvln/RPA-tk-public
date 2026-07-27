@@ -21,7 +21,18 @@ public final class WarmupConfigTest {
         assertFalse(config.shareEnabled);
         assertTrue(config.swipeRandomizationEnabled);
         assertTrue(config.commentScrollRandom);
+        assertTrue(config.skipLive);
         config.validate();
+        assertTrue(config.toJson().optJSONObject("browse").optBoolean("skip_live", false));
+    }
+
+    @Test public void skipLiveRoundTripsInBrowseJson() throws Exception {
+        WarmupConfig config = WarmupConfig.defaultsFor("cold");
+        config.skipLive = false;
+        WarmupConfig restored = WarmupConfig.fromJson(config.toJson());
+        assertFalse(restored.skipLive);
+        restored.skipLive = true;
+        assertTrue(WarmupConfig.fromJson(restored.toJson()).skipLive);
     }
 
     @Test(expected = IllegalArgumentException.class)

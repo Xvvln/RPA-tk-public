@@ -79,7 +79,14 @@ public final class VideoSurfaceContext {
         return new Result(Kind.UNKNOWN, 0d, evidence);
     }
 
-    /** Require the same high-confidence origin contract in two consecutive snapshots. */
+    /**
+     * Require a stable origin contract across two snapshots.
+     *
+     * <p>Cold start and page-turn animations often blank top tabs or the action rail for a single
+     * frame. Treat {@code HOME|SEARCH + UNKNOWN} as a transient observation of the known side so
+     * opening recovery can wait instead of failing immediately. Conflicting home vs search
+     * contracts still collapse to UNKNOWN.</p>
+     */
     public static Result consecutive(Result first, Result second) {
         List<String> evidence = union(first.evidence, second.evidence);
         if (first.kind == second.kind && first.kind != Kind.UNKNOWN
@@ -88,8 +95,46 @@ public final class VideoSurfaceContext {
             evidence.add("context:stable_2_consecutive_snapshots");
             return new Result(second.kind, Math.min(first.confidence, second.confidence), evidence);
         }
+        Result tolerated = tolerateTransientUnknown(first, second, evidence);
+        if (tolerated != null) return tolerated;
         evidence.add("context:unstable_" + first.kind.name() + "_to_" + second.kind.name());
         return new Result(Kind.UNKNOWN, 0d, evidence);
+    }
+
+    private static Result tolerateTransientUnknown(Result first, Result second,
+                                                   List<String> evidence) {
+        Result known;
+        Result unknown;
+        if (first.kind != Kind.UNKNOWN && second.kind == Kind.UNKNOWN
+                && first.confidence >= MIN_STABLE_CONFIDENCE) {
+            known = first;
+            unknown = second;
+        } else if (second.kind != Kind.UNKNOWN && first.kind == Kind.UNKNOWN
+                && second.confidence >= MIN_STABLE_CONFIDENCE) {
+            known = second;
+            unknown = first;
+        } else {
+            return null;
+        }
+        // A blank paint of the same surface is fine. A peer that still shows the search-detail
+        // back affordance (or home chrome while the known side is search) is a real conflict.
+        if (known.kind == Kind.RECOMMENDATION_HOME
+                && (hasEvidence(unknown, "search_detail:back_present")
+                || hasEvidence(unknown, "search_detail:top_search"))) {
+            return null;
+        }
+        if (known.kind == Kind.SEARCH_DETAIL
+                && hasEvidence(unknown, "home:recommendation_tab_present")
+                && hasEvidence(unknown, "home:bottom_navigation_present")) {
+            return null;
+        }
+        evidence.add("context:tolerate_transient_unknown_peer");
+        evidence.add("context:kept_" + known.kind.name().toLowerCase(Locale.ROOT));
+        return new Result(known.kind, Math.max(0.80d, known.confidence * 0.92d), evidence);
+    }
+
+    private static boolean hasEvidence(Result result, String marker) {
+        return result.evidence.contains(marker);
     }
 
     private enum Region { TOP, BOTTOM }

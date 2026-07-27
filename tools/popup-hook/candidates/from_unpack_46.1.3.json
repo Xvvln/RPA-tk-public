@@ -1,0 +1,199 @@
+{
+  "apk": "com.zhiliaoapp.musically",
+  "versionName": "46.1.3",
+  "versionCode": 2024601030,
+  "source": "jadx decompile of classes4/24/30 from tk-unpack-20260723/base.apk",
+  "soft_cta_strings": [
+    "Not now",
+    "Maybe later",
+    "Got it",
+    "以后再说",
+    "稍后再说",
+    "我知道了",
+    "跳过"
+  ],
+  "hook_targets": [
+    {
+      "id": "email_popup_show",
+      "class": "com.ss.android.ugc.aweme.account.login.email.EmailPopUpFragment",
+      "method": "show",
+      "descriptor": "()V",
+      "notes": "TuxSheet show BindUserEmail; real email bind popup"
+    },
+    {
+      "id": "account_confirm_prompt_service",
+      "class": "com.ss.android.ugc.aweme.account.prompt.AccountShowConfirmPromptServiceImpl",
+      "method": "LIZ",
+      "notes": "gate for phone/email reconfirm; strings include Not now"
+    },
+    {
+      "id": "show_prompt_experiment",
+      "class": "com.ss.android.ugc.aweme.account.experiment.prompt.ShowPromptToConfirmDynamicDataExperiment",
+      "method": "LIZ",
+      "notes": "metadata holder for confirm_email_phone_phase2 popup copy"
+    },
+    {
+      "id": "tako_disclaimer_fragment",
+      "class": "com.ss.android.ugc.aweme.tako.botpage.components.disclaimer.ui.TakoDisclaimerWithTosFragment",
+      "notes": "AI Tako disclaimer with Not now / Agree"
+    },
+    {
+      "id": "poplayer_popup_manager",
+      "class": "com.bytedance.poplayer.core.PopupManager",
+      "notes": "ByteDance popup queue; hook all public methods for discovery"
+    },
+    {
+      "id": "framework_dialog_show",
+      "class": "android.app.Dialog",
+      "method": "show",
+      "notes": "framework fallback: log stack on every dialog show"
+    }
+  ],
+  "androguard_xrefs": [
+    {
+      "id": "xref_maybe_later_invoke$110",
+      "class": "kotlin.jvm.internal.AwS639S0100000_15",
+      "method": "invoke$110",
+      "descriptor": "",
+      "string": "openAICommentaryGuidePanel secondary action: maybe later",
+      "needle": "Maybe later",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_maybe_later_invoke$25",
+      "class": "kotlin.jvm.internal.AFwS315S0000000_15",
+      "method": "invoke$25",
+      "descriptor": "",
+      "string": "showIntroPanelForInviterPanel, clicked on Maybe Later",
+      "needle": "Maybe later",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_maybe_later_invoke$28",
+      "class": "kotlin.jvm.internal.AFwS315S0000000_15",
+      "method": "invoke$28",
+      "descriptor": "",
+      "string": "showIntroPanelForInviterPanel, clicked on Maybe Later",
+      "needle": "Maybe later",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_LJJLIL",
+      "class": "X.11Yl",
+      "method": "LJJLIL",
+      "descriptor": "(Ljava/lang/Boolean;Ljava/lang/String;)V[access_flags=publicfinal]@0x75f2a",
+      "string": "not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_LIZ$64",
+      "class": "Y.AcS504S0100000_17",
+      "method": "LIZ$64",
+      "descriptor": "",
+      "string": "not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_<clinit>",
+      "class": "X.0h2r",
+      "method": "<clinit>",
+      "descriptor": "()V[access_flags=publicstaticconstructor]@0x51adb4>",
+      "string": "Not Now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_got_it_invoke$252",
+      "class": "kotlin.jvm.internal.AwS370S0200000_1",
+      "method": "invoke$252",
+      "descriptor": "",
+      "string": "Got it",
+      "needle": "Got it",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_<clinit>",
+      "class": "X.0pb2",
+      "method": "<clinit>",
+      "descriptor": "()V[access_flags=publicstaticconstructor]@0x7bab68>",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_LIZ",
+      "class": "X.10Ao",
+      "method": "LIZ",
+      "descriptor": "([LX/0LGk;)V[access_flags=publicfinalvarargs]@0x4960b8>",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_onCanceled",
+      "class": "X.10Ao",
+      "method": "onCanceled",
+      "descriptor": "()V[access_flags=publicfinal]@0x40cb80>",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_LIZ$9",
+      "class": "Y.ARunnableS97S0200000_29",
+      "method": "LIZ$9",
+      "descriptor": "()V[access_flags=publicfinal]@0x4e8a38>",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_invoke$50",
+      "class": "kotlin.jvm.internal.AwS407S0200000_3",
+      "method": "invoke$50",
+      "descriptor": "(Lkotlin/jvm/internal/AwS407S0200000_3;)Ljava/",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_not_now_invoke$473",
+      "class": "kotlin.jvm.internal.AwS592S0100000_3",
+      "method": "invoke$473",
+      "descriptor": "",
+      "string": "Not now",
+      "needle": "Not now",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_got_it_onClick$41",
+      "class": "Y.ACListenerS173S0100000_32",
+      "method": "onClick$41",
+      "descriptor": "(LY/ACListenerS173S0100000_32;Landroid/view/View;)V[",
+      "string": "got it",
+      "needle": "Got it",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_got_it_onViewCreated",
+      "class": "com.ss.android.ugc.aweme.biz.wallet.biz.finish.WalletAccountFinishAssem",
+      "method": "onViewCreated",
+      "descriptor": "",
+      "string": "got it",
+      "needle": "Got it",
+      "source": "androguard_string_xref"
+    },
+    {
+      "id": "xref_got_it_invoke$370",
+      "class": "kotlin.jvm.internal.AwS596S0100000_7",
+      "method": "invoke$370",
+      "descriptor": "",
+      "string": "got it",
+      "needle": "Got it",
+      "source": "androguard_string_xref"
+    }
+  ],
+  "androguard_string_entries": 7
+}

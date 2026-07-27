@@ -67,7 +67,9 @@ public final class SettingsActivity extends Activity {
     private RangeSlider watchRange;
     private MaterialButtonToggleGroup swipePace;
     private MaterialSwitch swipeRandomization;
-    private RangeSlider pauseRange;
+    private MaterialSwitch skipLive;
+    private EditText pauseMin;
+    private EditText pauseMax;
 
     private ModuleCard searchModule;
     private EditText searchKeywords;
@@ -294,9 +296,12 @@ public final class SettingsActivity extends Activity {
 
     private View buildBrowseDetails() {
         LinearLayout details = details();
-        details.addView(fieldLabel("观看时长"));
+        details.addView(fieldLabel("纯观看时长（不含交互）"));
         watchRange = range(1, 120, 1, 8, 20);
         details.addView(watchRange);
+        details.addView(text("只控制滑走前「干看」几秒。点赞/开评论/写评论/搜索/恢复弹窗的时间不在这里，"
+                        + "所以单条视频墙钟时间会明显长于该区间。",
+                12, RpaPalette.TEXT_MUTED));
         details.addView(fieldLabel("滑动速度"));
         swipePace = choices(new String[]{"慢速", "自然", "快速"});
         details.addView(swipePace);
@@ -304,9 +309,33 @@ public final class SettingsActivity extends Activity {
         details.addView(swipeRandomization);
         details.addView(text("在所选速度档位内加入小幅、受限的起止点与时长偏差",
                 12, RpaPalette.TEXT_MUTED));
-        details.addView(fieldLabel("视频间随机停顿"));
-        pauseRange = range(0, 10, 1, 1, 4);
-        details.addView(pauseRange);
+        details.addView(fieldLabel("视频间随机停顿（滑走后、下一条前，秒）"));
+        // Number fields instead of RangeSlider: thumbs at 0/0 or equal values are hard to drag
+        // on Material RangeSlider (min separation + nested ScrollView).
+        LinearLayout pauseRow = row();
+        pauseMin = number("0", false);
+        pauseMax = number("1", false);
+        pauseRow.addView(field("最短", pauseMin), weighted());
+        pauseRow.addView(horizontalSpace(8));
+        pauseRow.addView(field("最长", pauseMax), weighted());
+        details.addView(pauseRow);
+        LinearLayout pausePresets = row();
+        pausePresets.setPadding(0, dp(6), 0, dp(2));
+        pausePresets.addView(presetChip("无停顿", 0, 0), weighted());
+        pausePresets.addView(horizontalSpace(6));
+        pausePresets.addView(presetChip("0–1秒", 0, 1), weighted());
+        pausePresets.addView(horizontalSpace(6));
+        pausePresets.addView(presetChip("1–4秒", 1, 4), weighted());
+        details.addView(pausePresets);
+        details.addView(text("可填 0–30。最短≤最长；无停顿填 0 和 0。与纯观看时长叠加。",
+                12, RpaPalette.TEXT_MUTED));
+        refreshOnText(pauseMin);
+        refreshOnText(pauseMax);
+        skipLive = optionSwitch("直播内容直接跳过（不点赞/评论/关注）", true);
+        details.addView(skipLive);
+        details.addView(text("推荐流出现「直播中」时观看后滑走，不执行交互。关闭后按普通视频尝试工作流。",
+                12, RpaPalette.TEXT_MUTED));
+        skipLive.setOnCheckedChangeListener((button, checked) -> refreshSummaries());
         return details;
     }
 
@@ -514,7 +543,9 @@ public final class SettingsActivity extends Activity {
         watchRange.setValues((float) config.watchMinSeconds, (float) config.watchMaxSeconds);
         checkChoice(swipePace, paceIndex(config.swipePace));
         swipeRandomization.setChecked(config.swipeRandomizationEnabled);
-        pauseRange.setValues((float) config.pauseMinSeconds, (float) config.pauseMaxSeconds);
+        pauseMin.setText(String.valueOf(Math.max(0, config.pauseMinSeconds)));
+        pauseMax.setText(String.valueOf(Math.max(config.pauseMinSeconds, config.pauseMaxSeconds)));
+        skipLive.setChecked(config.skipLive);
 
         searchModule.toggle.setChecked(config.searchEnabled);
         searchKeywords.setText(String.join(", ", config.searchKeywords));
@@ -584,8 +615,16 @@ public final class SettingsActivity extends Activity {
         config.watchMaxSeconds = Math.round(watchRange.getValues().get(1));
         config.swipePace = paceValue(checkedIndex(swipePace));
         config.swipeRandomizationEnabled = swipeRandomization.isChecked();
-        config.pauseMinSeconds = Math.round(pauseRange.getValues().get(0));
-        config.pauseMaxSeconds = Math.round(pauseRange.getValues().get(1));
+        int pauseLo = Math.max(0, integerOr(pauseMin, 0));
+        int pauseHi = Math.max(0, integerOr(pauseMax, pauseLo));
+        if (pauseHi < pauseLo) {
+            int swap = pauseLo;
+            pauseLo = pauseHi;
+            pauseHi = swap;
+        }
+        config.pauseMinSeconds = Math.min(pauseLo, 30);
+        config.pauseMaxSeconds = Math.min(Math.max(pauseHi, config.pauseMinSeconds), 60);
+        config.skipLive = skipLive.isChecked();
 
         config.searchEnabled = searchModule.toggle.isChecked();
         config.searchKeywords = csv(searchKeywords.getText().toString());
@@ -818,10 +857,14 @@ public final class SettingsActivity extends Activity {
 
     private void refreshSummaries() {
         if (!uiReady) return;
-        browseModule.summary.setText(String.format(Locale.CHINA, "必需 · %d–%d秒 · %s · %s",
+        int pMin = Math.max(0, integerOr(pauseMin, 0));
+        int pMax = Math.max(pMin, integerOr(pauseMax, pMin));
+        browseModule.summary.setText(String.format(Locale.CHINA,
+                "必需 · 纯看 %d–%d秒 · 间停 %d–%d秒 · %s · %s",
                 Math.round(watchRange.getValues().get(0)), Math.round(watchRange.getValues().get(1)),
+                pMin, pMax,
                 paceLabel(checkedIndex(swipePace)),
-                swipeRandomization.isChecked() ? "轨迹随机" : "固定轨迹"));
+                skipLive.isChecked() ? "跳过直播" : "直播可交互"));
         searchModule.summary.setText(searchModule.toggle.isChecked()
                 ? Math.max(1, csv(searchKeywords.getText().toString()).size()) + " 个关键词 · 最多 " + safe(maxSearches) + " 次"
                 : "未启用");
@@ -892,7 +935,15 @@ public final class SettingsActivity extends Activity {
         value.setValueFrom(from);
         value.setValueTo(to);
         value.setStepSize(step);
-        value.setValues(first, second);
+        // Allow both thumbs on the same value (e.g. 0–0 / 3–3). Default separation blocks that.
+        try {
+            value.setMinSeparationValue(0f);
+        } catch (RuntimeException ignored) {
+            // Older Material may not expose separation APIs; number fields cover critical cases.
+        }
+        float lo = Math.max(from, Math.min(first, second));
+        float hi = Math.min(to, Math.max(first, second));
+        value.setValues(lo, hi);
         value.setTickVisible(false);
         value.setTrackHeight(dp(4));
         value.setThumbWidth(dp(18));
@@ -901,6 +952,43 @@ public final class SettingsActivity extends Activity {
         value.setThumbTintList(ColorStateList.valueOf(RpaPalette.PINK));
         value.addOnChangeListener((slider, changed, user) -> refreshSummaries());
         return value;
+    }
+
+    private MaterialButton presetChip(String label, int minSeconds, int maxSeconds) {
+        MaterialButton button = baseButton(label, () -> {
+            pauseMin.setText(String.valueOf(minSeconds));
+            pauseMax.setText(String.valueOf(maxSeconds));
+            refreshSummaries();
+        });
+        button.setTextSize(12);
+        button.setTextColor(RpaPalette.TEXT);
+        button.setBackgroundTintList(ColorStateList.valueOf(RpaPalette.SURFACE_RAISED));
+        button.setStrokeColor(ColorStateList.valueOf(RpaPalette.BORDER));
+        button.setStrokeWidth(dp(1));
+        button.setCornerRadius(dp(10));
+        button.setMinHeight(dp(40));
+        button.setPadding(dp(4), 0, dp(4), 0);
+        return button;
+    }
+
+    private void refreshOnText(EditText value) {
+        value.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
+                refreshSummaries();
+            }
+            @Override public void afterTextChanged(Editable text) {}
+        });
+    }
+
+    private static int integerOr(EditText value, int fallback) {
+        try {
+            String text = value.getText() == null ? "" : value.getText().toString().trim();
+            if (text.isEmpty()) return fallback;
+            return Integer.parseInt(text);
+        } catch (RuntimeException error) {
+            return fallback;
+        }
     }
 
     private Slider rateSlider() {
