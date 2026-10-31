@@ -34,6 +34,15 @@ public final class VideoSurfaceContext {
     private VideoSurfaceContext() {}
 
     public static Result analyze(UiSnapshot snapshot) {
+        CommentSurfaceContract.Result commentSurface = CommentSurfaceContract.analyze(snapshot);
+        if (commentSurface.blocksFeedClassification()) {
+            List<String> evidence = new ArrayList<>(commentSurface.evidence);
+            evidence.add("context:comment_modal_precedence");
+            evidence.add("context:input_surface="
+                    + commentSurface.inputSurface.kind.name().toLowerCase(Locale.ROOT));
+            return new Result(Kind.UNKNOWN, 0d, evidence);
+        }
+
         UiNode recommendationTab = findExact(snapshot, Region.TOP, "推荐", "for you");
         UiNode homeNavigation = findExact(snapshot, Region.BOTTOM, "首页", "home");
         boolean homeContract = sameWindow(recommendationTab, homeNavigation);

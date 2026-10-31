@@ -68,6 +68,36 @@ public final class PageStateSafetyTest {
     }
 
     @Test
+    public void openingSearchMayRestoreExistingResultsButNotAnUnrelatedPage() {
+        assertTrue(PageTransitionPolicy.allows(PageState.Page.FEED,
+                PageState.Page.SEARCH_INPUT, PageTransitionPolicy.Action.OPEN_SEARCH));
+        assertTrue(PageTransitionPolicy.allows(PageState.Page.FEED,
+                PageState.Page.SEARCH_RESULTS, PageTransitionPolicy.Action.OPEN_SEARCH));
+        assertFalse(PageTransitionPolicy.allows(PageState.Page.FEED,
+                PageState.Page.SEARCH_EMPTY, PageTransitionPolicy.Action.OPEN_SEARCH));
+        assertFalse(PageTransitionPolicy.allows(PageState.Page.FEED,
+                PageState.Page.COMMENTS, PageTransitionPolicy.Action.OPEN_SEARCH));
+    }
+
+    @Test
+    public void closeCommentsRequiresNegativeModalAndInputEvidence() {
+        PageState verifiedFeed = new PageState(PageState.Page.FEED, "video",
+                Collections.emptyList(), Collections.emptyList(), 0.92d,
+                Arrays.asList("comments:modal_absent", "input_surface:none"));
+        PageState keyboardStillOpen = new PageState(PageState.Page.FEED, "video",
+                Collections.emptyList(), Collections.emptyList(), 0.92d,
+                Arrays.asList("comments:modal_absent", "input_surface:ime_docked"));
+
+        assertTrue(PageTransitionPolicy.allows(PageState.Page.COMMENTS, verifiedFeed,
+                PageTransitionPolicy.Action.CLOSE_COMMENTS));
+        assertFalse(PageTransitionPolicy.allows(PageState.Page.COMMENTS, keyboardStillOpen,
+                PageTransitionPolicy.Action.CLOSE_COMMENTS));
+        assertFalse(PageTransitionPolicy.allows(PageState.Page.COMMENTS,
+                state(PageState.Page.FEED, 0.92d),
+                PageTransitionPolicy.Action.CLOSE_COMMENTS));
+    }
+
+    @Test
     public void transientForegroundBlockerRequiresTwoSamples() {
         PageState transientBlock = new PageState(PageState.Page.FEED, "video",
                 Collections.singletonList("tiktok_not_foreground"), Collections.emptyList(),

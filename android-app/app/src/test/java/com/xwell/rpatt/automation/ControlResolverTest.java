@@ -125,6 +125,28 @@ public final class ControlResolverTest {
                 snapshot(undo), ControlResolver.Role.REPOST_REMOVE).node);
     }
 
+    @Test
+    public void detectsEmptyCommentCountFromSemanticDescendantBeforeOpeningPanel() {
+        UiNode wrapper = node("", "", "", "android.widget.FrameLayout", true,
+                888, 1479, 1080, 1659, "0/4/2");
+        UiNode label = node("", "", "阅读或添加评论。抢首评 条评论",
+                "android.widget.Button", false,
+                900, 1490, 1060, 1640, "0/4/2/0");
+        UiSnapshot snapshot = snapshot(wrapper, label);
+
+        assertTrue(ControlResolver.isDefinitelyEmptyCommentEntry(snapshot, wrapper));
+    }
+
+    @Test
+    public void doesNotTreatNonZeroCommentCountAsEmpty() {
+        UiNode comments = node("", "", "阅读或添加评论。12 条评论",
+                "android.widget.Button", true,
+                888, 1479, 1080, 1659, "0/4/2");
+
+        assertTrue(!ControlResolver.isDefinitelyEmptyCommentEntry(
+                snapshot(comments), comments));
+    }
+
     private static UiSnapshot snapshot(UiNode... nodes) {
         return new UiSnapshot(1, PageAnalyzer.TIKTOK_PACKAGE,
                 1080, 2400, Arrays.asList(nodes));

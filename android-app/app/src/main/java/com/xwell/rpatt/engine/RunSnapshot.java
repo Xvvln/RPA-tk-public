@@ -1,7 +1,13 @@
 package com.xwell.rpatt.engine;
 
 public final class RunSnapshot {
-    public enum Status { IDLE, RUNNING, PAUSED, BLOCKED, FINISHED }
+    /**
+     * PAUSING and STOPPING are command-acknowledgement states. They keep every UI honest while
+     * the worker reaches a cooperative boundary instead of making a button press look ignored.
+     */
+    public enum Status {
+        IDLE, RUNNING, PAUSING, PAUSED, STOPPING, BLOCKED, FAILED, FINISHED
+    }
 
     public final Status status;
     public final String phase;

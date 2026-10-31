@@ -21,8 +21,10 @@ import java.util.UUID;
 
 /** Durable write-ahead action journal and cross-run idempotency index. */
 public final class ActionLedger {
-    public enum State { PREPARED, ATTEMPTED, VERIFIED, COMMITTED, UNKNOWN }
-    public enum BeginDisposition { ALLOWED, DUPLICATE_COMMITTED, DUPLICATE_UNCERTAIN }
+    public enum State { PREPARED, ATTEMPTED, VERIFIED, COMMITTED, NOT_APPLIED, UNKNOWN }
+    public enum BeginDisposition {
+        ALLOWED, DUPLICATE_COMMITTED, DUPLICATE_NOT_APPLIED, DUPLICATE_UNCERTAIN
+    }
 
     public static final class BeginResult {
         public final BeginDisposition disposition;
@@ -65,6 +67,18 @@ public final class ActionLedger {
             transition(State.COMMITTED, evidence);
         }
 
+        /**
+         * The target and its pre/post state were both observable, and the requested mutation did
+         * not happen. This is materially different from UNKNOWN: it is safe to continue the run,
+         * but the same target must not be attempted again in this run.
+         */
+        public synchronized void notApplied(String reason, JSONObject evidence) throws IOException {
+            JSONObject detail = copy(evidence);
+            try { detail.put("reason", reason); }
+            catch (JSONException error) { throw new IOException("无法记录动作未应用状态", error); }
+            transition(State.NOT_APPLIED, detail);
+        }
+
         public synchronized void unknown(String reason, JSONObject evidence) throws IOException {
             JSONObject detail = copy(evidence);
             try { detail.put("reason", reason); }
@@ -76,7 +90,8 @@ public final class ActionLedger {
 
         private void transition(State next, JSONObject detail) throws IOException {
             boolean allowed = (state == State.PREPARED && next == State.ATTEMPTED)
-                    || (state == State.ATTEMPTED && (next == State.VERIFIED || next == State.UNKNOWN))
+                    || (state == State.ATTEMPTED && (next == State.VERIFIED
+                    || next == State.NOT_APPLIED || next == State.UNKNOWN))
                     || (state == State.VERIFIED && next == State.COMMITTED);
             if (!allowed) {
                 throw new IOException("非法动作事务迁移：" + state + " -> " + next);
@@ -86,6 +101,8 @@ public final class ActionLedger {
             if (next == State.COMMITTED) {
                 currentCommitted.put(action, currentCommitted.getOrDefault(action, 0) + 1);
                 currentActionTargets.add(targetHash);
+            } else if (next == State.NOT_APPLIED) {
+                currentNotApplied.put(action, currentNotApplied.getOrDefault(action, 0) + 1);
             }
         }
     }
@@ -94,7 +111,9 @@ public final class ActionLedger {
     private final File globalFile;
     private final String runId;
     private final Map<String, State> latestByKey = new LinkedHashMap<>();
+    private final Map<String, String> latestRunByKey = new LinkedHashMap<>();
     private final Map<String, Integer> currentCommitted = new LinkedHashMap<>();
+    private final Map<String, Integer> currentNotApplied = new LinkedHashMap<>();
     private final Set<String> currentActionTargets = new LinkedHashSet<>();
     private final Set<String> committedVideoTargets = new LinkedHashSet<>();
 
@@ -114,12 +133,8 @@ public final class ActionLedger {
         String targetHash = sha256(targetFingerprint);
         String payloadHash = sha256(payload == null ? "" : payload);
         String key = sha256(normalizedAction + "\n" + targetHash + "\n" + payloadHash);
-        State prior = latestByKey.get(key);
-        if (prior != null) {
-            return new BeginResult(prior == State.COMMITTED
-                    ? BeginDisposition.DUPLICATE_COMMITTED
-                    : BeginDisposition.DUPLICATE_UNCERTAIN, null, prior);
-        }
+        BeginResult existing = existing(key);
+        if (!existing.allowed()) return existing;
         Transaction transaction = new Transaction(
                 UUID.randomUUID().toString(), normalizedAction, key, targetHash);
         JSONObject detail = copy(evidence);
@@ -132,6 +147,43 @@ public final class ActionLedger {
         return new BeginResult(BeginDisposition.ALLOWED, transaction, null);
     }
 
+    /**
+     * Read-only idempotency lookup used before opening a modal or entering text.
+     *
+     * <p>The real transaction is still created by {@link #begin}; this probe deliberately writes
+     * no PREPARED record because no external action has started yet.</p>
+     */
+    public synchronized BeginResult probe(String action, String targetFingerprint,
+                                          String payload) throws IOException {
+        String normalizedAction = clean(action).toLowerCase(Locale.ROOT);
+        if (normalizedAction.isEmpty() || clean(targetFingerprint).isEmpty()) {
+            throw new IOException("动作类型和目标指纹不能为空");
+        }
+        String targetHash = sha256(targetFingerprint);
+        String payloadHash = sha256(payload == null ? "" : payload);
+        String key = sha256(normalizedAction + "\n" + targetHash + "\n" + payloadHash);
+        return existing(key);
+    }
+
+    private BeginResult existing(String key) {
+        State prior = latestByKey.get(key);
+        if (prior != null) {
+            if (prior == State.NOT_APPLIED && !runId.equals(latestRunByKey.get(key))) {
+                // A confirmed no-op may be attempted on a later run after the platform has
+                // recovered, but never twice against the same target in one run.
+                prior = null;
+            }
+        }
+        if (prior != null) {
+            return new BeginResult(prior == State.COMMITTED
+                    ? BeginDisposition.DUPLICATE_COMMITTED
+                    : prior == State.NOT_APPLIED
+                    ? BeginDisposition.DUPLICATE_NOT_APPLIED
+                    : BeginDisposition.DUPLICATE_UNCERTAIN, null, prior);
+        }
+        return new BeginResult(BeginDisposition.ALLOWED, null, null);
+    }
+
     public synchronized int committedCount(String action) {
         return currentCommitted.getOrDefault(clean(action).toLowerCase(Locale.ROOT), 0);
     }
@@ -139,6 +191,16 @@ public final class ActionLedger {
     public synchronized int committedTotal() {
         int total = 0;
         for (int count : currentCommitted.values()) total += count;
+        return total;
+    }
+
+    public synchronized int notAppliedCount(String action) {
+        return currentNotApplied.getOrDefault(clean(action).toLowerCase(Locale.ROOT), 0);
+    }
+
+    public synchronized int notAppliedTotal() {
+        int total = 0;
+        for (int count : currentNotApplied.values()) total += count;
         return total;
     }
 
@@ -150,6 +212,18 @@ public final class ActionLedger {
             }
         } catch (JSONException error) {
             throw new IOException("无法序列化动作统计", error);
+        }
+        return value;
+    }
+
+    public synchronized JSONObject currentNotAppliedCountsJson() throws IOException {
+        JSONObject value = new JSONObject();
+        try {
+            for (Map.Entry<String, Integer> item : currentNotApplied.entrySet()) {
+                value.put(item.getKey(), item.getValue());
+            }
+        } catch (JSONException error) {
+            throw new IOException("无法序列化未应用动作统计", error);
         }
         return value;
     }
@@ -184,6 +258,7 @@ public final class ActionLedger {
             // authorize a second external write merely because diagnostics were interrupted.
             write(globalFile, base.toString() + "\n");
             latestByKey.put(transaction.idempotencyKey, state);
+            latestRunByKey.put(transaction.idempotencyKey, runId);
             write(runFile, runRecord.toString() + "\n");
         } catch (JSONException error) {
             throw new IOException("无法序列化动作事务", error);
@@ -201,7 +276,10 @@ public final class ActionLedger {
                     JSONObject value = new JSONObject(line);
                     String key = value.optString("idempotency_key");
                     State state = parseState(value.optString("state"));
-                    if (!key.isEmpty() && state != null) latestByKey.put(key, state);
+                    if (!key.isEmpty() && state != null) {
+                        latestByKey.put(key, state);
+                        latestRunByKey.put(key, value.optString("run_id"));
+                    }
                 } catch (JSONException ignored) {
                     // A torn final line cannot authorize a retry. It is ignored here and remains
                     // visible in the file for diagnostics; prior complete states still apply.

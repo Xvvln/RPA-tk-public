@@ -173,19 +173,21 @@ public final class AccessibilityGateway {
         return false;
     }
 
-    /** Hide only an actual input-method window; never use Back blindly on the comments panel. */
+    /**
+     * Hide the generic Android input surface and verify the window state. The keyboard package,
+     * layout and key labels are deliberately irrelevant.
+     */
     public boolean dismissInputMethodIfPresent() {
-        boolean inputMethodPresent = false;
-        for (AccessibilityWindowInfo window : service.getWindows()) {
-            if (window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
-                inputMethodPresent = true;
-                break;
-            }
-        }
-        if (!inputMethodPresent) return true;
+        InputSurfaceDetector.Result before = InputSurfaceDetector.analyze(snapshot());
+        if (!before.inputActive()) return true;
         boolean dismissed = pressBack();
-        if (dismissed) SystemClock.sleep(450);
-        return dismissed;
+        if (!dismissed) return false;
+        for (int sample = 0; sample < 6; sample++) {
+            SystemClock.sleep(sample == 0 ? 220 : 120);
+            InputSurfaceDetector.Result after = InputSurfaceDetector.analyze(snapshot());
+            if (!after.hasInputMethodWindow()) return true;
+        }
+        return false;
     }
 
     public boolean clickText(String... labels) {
@@ -359,19 +361,30 @@ public final class AccessibilityGateway {
     public boolean tapResolvedGesture(ControlResolver.Role role, UiNode captured,
                                       ControlResolver.Role anchorRole, UiNode capturedAnchor) {
         if (role == null || captured == null) return false;
-        UiSnapshot current = snapshot();
-        UiNode currentAnchor = null;
-        if (anchorRole != null || capturedAnchor != null) {
-            if (anchorRole == null || capturedAnchor == null) return false;
-            ControlResolver.Match anchorMatch = ControlResolver.resolve(current, anchorRole);
-            currentAnchor = anchorMatch == null ? null : anchorMatch.node;
-            if (!GestureTargetContract.sameVisibleTarget(
-                    current, capturedAnchor, currentAnchor)) return false;
+        for (int sample = 0; sample < 11; sample++) {
+            UiSnapshot current = snapshot();
+            UiNode currentAnchor = null;
+            if (anchorRole != null || capturedAnchor != null) {
+                if (anchorRole == null || capturedAnchor == null) return false;
+                ControlResolver.Match anchorMatch = ControlResolver.resolve(current, anchorRole);
+                currentAnchor = anchorMatch == null ? null : anchorMatch.node;
+                if (!GestureTargetContract.sameVisibleTarget(
+                        current, capturedAnchor, currentAnchor)) return false;
+            }
+            ControlResolver.Match match = ControlResolver.resolve(current, role, currentAnchor);
+            UiNode target = match == null ? null : match.node;
+            if (!GestureTargetContract.sameVisibleTarget(current, captured, target)) return false;
+            VisibleHitRegion.Point point = VisibleHitRegion.resolve(current, target);
+            if (point != null) {
+                Path path = new Path();
+                path.moveTo(point.x, point.y);
+                return gesture(path, 100);
+            }
+            if (!VisibleHitRegion.hasPassiveSameAppTransientAbove(current, target)
+                    || sample >= 10) return false;
+            SystemClock.sleep(220);
         }
-        ControlResolver.Match match = ControlResolver.resolve(current, role, currentAnchor);
-        UiNode target = match == null ? null : match.node;
-        if (!GestureTargetContract.sameVisibleTarget(current, captured, target)) return false;
-        return tapVisibleIntersection(target.bounds);
+        return false;
     }
 
     public UiNode visibleCommentSend(UiNode input) {
@@ -561,6 +574,15 @@ public final class AccessibilityGateway {
         path.moveTo(x1, y1);
         path.quadTo((x1 + x2) / 2f, (y1 + y2) / 2f, x2, y2);
         return gesture(path, durationMs);
+    }
+
+    /**
+     * Ask the resolved outer pager to advance semantically. This is reserved for nested paging
+     * surfaces such as photo posts, where a raw gesture can be consumed by the inner carousel.
+     */
+    public boolean scrollForward(UiNode pager) {
+        if (pager == null || !pager.scrollable || !pager.canScrollForward) return false;
+        return performOnIdentity(pager, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, null);
     }
 
     public boolean longPressCenter(long durationMs) {
@@ -929,7 +951,11 @@ public final class AccessibilityGateway {
         node.getBoundsInScreen(bounds);
         target.add(new UiNode(node.getViewIdResourceName(), value(node.getText()), value(node.getContentDescription()),
                 value(node.getClassName()), value(node.getPackageName()), node.isSelected(), node.isClickable(),
-                node.isVisibleToUser(), bounds, windowId, treePath));
+                node.isVisibleToUser(), bounds, windowId, treePath,
+                node.isFocusable(), node.isFocused(), node.isEditable(), node.getDrawingOrder(),
+                node.isScrollable(),
+                supportsAction(node, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD),
+                supportsAction(node, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)));
         for (int index = 0; index < node.getChildCount(); index++) {
             AccessibilityNodeInfo child = node.getChild(index);
             if (child == null) continue;
@@ -940,6 +966,13 @@ public final class AccessibilityGateway {
 
     private static void recycleAll(List<AccessibilityNodeInfo> nodes) {
         for (AccessibilityNodeInfo node : nodes) node.recycle();
+    }
+
+    private static boolean supportsAction(AccessibilityNodeInfo node, int actionId) {
+        for (AccessibilityNodeInfo.AccessibilityAction action : node.getActionList()) {
+            if (action.getId() == actionId) return true;
+        }
+        return false;
     }
 
     private static String value(CharSequence value) { return value == null ? "" : value.toString().trim(); }

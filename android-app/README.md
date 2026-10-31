@@ -11,6 +11,22 @@ cd android-app
 
 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
+### 真机覆盖安装
+
+开发调试统一使用：
+
+```zsh
+./install_debug.sh
+```
+
+脚本执行 `adb install -r` 后直接打开 App，**不得**再对
+`com.xwell.rpatt` 执行 `adb shell am force-stop`。当前 ColorOS 真机已验证：
+普通覆盖安装会保留无障碍授权，而系统级强行停止会把该服务从授权列表清空，
+导致下次启动必须重新手动开启。
+
+系统无障碍列表中的服务名称是“TK养号助手 · 页面操作辅助”。首页分别显示
+“未授权”“已授权，等待连接”和“已连接”，不要把授权存在与服务已经绑定混为一谈。
+
 ## 首次使用
 
 1. 安装并打开 TK养号助手。

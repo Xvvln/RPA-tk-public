@@ -2,7 +2,9 @@ package com.xwell.rpatt.overlay;
 
 /** Immutable UI model consumed by the overlay; it has no dependency on the task engine. */
 public final class OverlayState {
-    public enum Status { IDLE, RUNNING, PAUSED, BLOCKED, FINISHED }
+    public enum Status {
+        IDLE, RUNNING, PAUSING, PAUSED, STOPPING, BLOCKED, FAILED, FINISHED
+    }
 
     public final Status status;
     public final String phase;
@@ -29,8 +31,21 @@ public final class OverlayState {
         this.message = message;
     }
 
-    public boolean active() { return status == Status.RUNNING || status == Status.PAUSED; }
+    public boolean active() {
+        return status == Status.RUNNING || status == Status.PAUSING
+                || status == Status.PAUSED || status == Status.STOPPING
+                || status == Status.BLOCKED;
+    }
     public boolean paused() { return status == Status.PAUSED; }
+    public boolean pausing() { return status == Status.PAUSING; }
+    public boolean stopping() { return status == Status.STOPPING; }
+    public boolean blocked() { return status == Status.BLOCKED; }
+    public boolean canTogglePause() { return status == Status.RUNNING || status == Status.PAUSED; }
+    public boolean canContinue() { return status == Status.PAUSED || status == Status.BLOCKED; }
+    public boolean canStop() {
+        return status == Status.RUNNING || status == Status.PAUSING
+                || status == Status.PAUSED || status == Status.BLOCKED;
+    }
     /** A blocked or finished run is over and may be started again from the overlay. */
     public boolean canStart() { return !active(); }
 }

@@ -43,6 +43,22 @@ final class PageTurnProfile {
                 0.64f, 0.61f, 0.91f, 0.08f, randomize, random);
     }
 
+    /**
+     * Photo posts contain a horizontal carousel inside the vertical feed pager. Keep X constant so
+     * Android's nested-pager arbitration cannot mistake the recovery gesture for a photo turn.
+     */
+    static PageTurnProfile forPhotoFallback(int attempt, boolean randomize, Random random) {
+        float x = randomize ? boundedJitter(random, 0.55f, 0.08f, 0.42f, 0.70f) : 0.55f;
+        if (attempt <= 1) {
+            return new PageTurnProfile("photo_vertical",
+                    randomize ? sample(random, 220, 360) : 290,
+                    x, x, 0.84f, 0.16f, randomize);
+        }
+        return new PageTurnProfile("photo_vertical_extended",
+                randomize ? sample(random, 180, 280) : 230,
+                x, x, 0.90f, 0.09f, randomize);
+    }
+
     private static PageTurnProfile profile(String name, long durationMs,
                                            float startX, float endX, float startY, float endY,
                                            boolean randomize, Random random) {

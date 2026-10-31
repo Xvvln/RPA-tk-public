@@ -11,8 +11,11 @@ public final class RunUiStateMapper {
         OverlayState.Status status;
         switch (snapshot.status) {
             case RUNNING: status = OverlayState.Status.RUNNING; break;
+            case PAUSING: status = OverlayState.Status.PAUSING; break;
             case PAUSED: status = OverlayState.Status.PAUSED; break;
+            case STOPPING: status = OverlayState.Status.STOPPING; break;
             case BLOCKED: status = OverlayState.Status.BLOCKED; break;
+            case FAILED: status = OverlayState.Status.FAILED; break;
             case FINISHED: status = OverlayState.Status.FINISHED; break;
             default: status = OverlayState.Status.IDLE;
         }

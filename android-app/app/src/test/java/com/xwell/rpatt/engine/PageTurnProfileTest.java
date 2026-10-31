@@ -71,4 +71,18 @@ public final class PageTurnProfileTest {
         assertEquals(first.endY, repeated.endY, 0f);
         assertTrue(!first.randomized);
     }
+
+    @Test public void photoFallbackKeepsHorizontalCoordinateConstant() {
+        PageTurnProfile first = PageTurnProfile.forPhotoFallback(
+                1, true, new Random(21));
+        PageTurnProfile second = PageTurnProfile.forPhotoFallback(
+                2, true, new Random(22));
+
+        assertEquals("photo_vertical", first.name);
+        assertEquals("photo_vertical_extended", second.name);
+        assertEquals(first.startX, first.endX, 0f);
+        assertEquals(second.startX, second.endX, 0f);
+        assertTrue(first.startY > first.endY);
+        assertTrue(second.startY > second.endY);
+    }
 }

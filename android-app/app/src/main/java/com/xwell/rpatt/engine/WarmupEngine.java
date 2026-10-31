@@ -5,12 +5,17 @@ import android.os.SystemClock;
 
 import com.xwell.rpatt.BuildConfig;
 import com.xwell.rpatt.automation.AccessibilityGateway;
+import com.xwell.rpatt.automation.CommentCloseCoordinator;
+import com.xwell.rpatt.automation.CommentSurfaceContract;
 import com.xwell.rpatt.automation.ControlResolver;
 import com.xwell.rpatt.automation.FavoriteVisualEvidence;
+import com.xwell.rpatt.automation.FeedPagerContract;
+import com.xwell.rpatt.automation.GestureTargetContract;
 import com.xwell.rpatt.automation.InterruptPolicy;
 import com.xwell.rpatt.automation.KeywordMatcher;
 import com.xwell.rpatt.automation.PageAnalyzer;
 import com.xwell.rpatt.automation.TikTokPermissionProbe;
+import com.xwell.rpatt.automation.ToggleActionOutcome;
 import com.xwell.rpatt.automation.PageStability;
 import com.xwell.rpatt.automation.PageState;
 import com.xwell.rpatt.automation.PageTransitionPolicy;
@@ -58,6 +63,8 @@ public final class WarmupEngine {
     private volatile boolean paused;
     private volatile boolean pauseRequested;
     private volatile boolean stopRequested;
+    private volatile boolean externalActionInFlight;
+    private volatile boolean blockedWaiting;
     private RunBudget budget;
 
     private WarmupEngine() {}
@@ -77,6 +84,8 @@ public final class WarmupEngine {
             paused = false;
             pauseRequested = false;
             stopRequested = false;
+            externalActionInFlight = false;
+            blockedWaiting = false;
         }
         worker.execute(() -> run(context.getApplicationContext(), config));
         return true;
@@ -96,9 +105,9 @@ public final class WarmupEngine {
                 pauseRequested = true;
             }
         }
-        publish(RunSnapshot.Status.RUNNING, current.phase,
-                resume ? "安全复检" : "正在安全暂停",
-                resume ? "" : "完成当前视频后暂停");
+        publish(resume ? RunSnapshot.Status.RUNNING : RunSnapshot.Status.PAUSING,
+                current.phase, resume ? "安全复检" : "正在暂停",
+                resume ? "" : "控制命令已收到，正在到达可暂停位置");
     }
 
     public void requestPauseAtCheckpoint() {
@@ -106,8 +115,8 @@ public final class WarmupEngine {
             if (!running || paused || pauseRequested) return;
             pauseRequested = true;
         }
-        publish(RunSnapshot.Status.RUNNING, current.phase,
-                "正在安全暂停", "完成当前视频后暂停");
+        publish(RunSnapshot.Status.PAUSING, current.phase,
+                "正在暂停", "控制命令已收到，正在到达可暂停位置");
     }
 
     public void resumeFromCheckpoint() {
@@ -121,15 +130,31 @@ public final class WarmupEngine {
         publish(RunSnapshot.Status.RUNNING, current.phase, "安全复检", "");
     }
 
+    public void continueBlocked() {
+        synchronized (control) {
+            if (!running || !blockedWaiting) return;
+            blockedWaiting = false;
+            if (budget != null) budget.resume(SystemClock.elapsedRealtime());
+            control.notifyAll();
+        }
+        publish(RunSnapshot.Status.RUNNING, "恢复检查",
+                "正在继续", "重新确认环境并从下一条安全视频继续");
+    }
+
     public void stop() {
         synchronized (control) {
             if (!running) return;
             stopRequested = true;
             paused = false;
             pauseRequested = false;
+            blockedWaiting = false;
             if (budget != null) budget.resume(SystemClock.elapsedRealtime());
             control.notifyAll();
         }
+        publish(RunSnapshot.Status.STOPPING, current.phase,
+                "正在停止", externalActionInFlight
+                        ? "正在核验已发起的操作，核验后立即停止"
+                        : "停止命令已收到");
     }
 
     private void run(Context context, WarmupConfig config) {
@@ -187,6 +212,12 @@ public final class WarmupEngine {
                     .put("message", "TikTok 已在前台"));
 
             logger.event("run_started", new JSONObject().put("dry_run", !config.interactionsApply));
+            logger.event("interaction_policy", new JSONObject()
+                    .put("comment_enabled", config.commentEnabled)
+                    .put("comment_rate", config.commentRate)
+                    .put("comment_max", config.maxComments)
+                    .put("comment_only_if_relevant", config.commentOnlyIfRelevant)
+                    .put("comment_candidate_count", clean(config.commentTexts).size()));
             budget = new RunBudget(SystemClock.elapsedRealtime(), config.maxMinutes * 60_000L, config.videoCount);
 
             publish(RunSnapshot.Status.RUNNING, "开场检查", "识别可浏览页", "");
@@ -205,17 +236,31 @@ public final class WarmupEngine {
             if (stopRequested) stopReason = "user";
             else if (budget.exhausted(now())) stopReason = budget.exhaustionReason(now());
         } catch (Blocked error) {
-            stopReason = error.code;
-            blocked = true;
-            if (logger != null) captureBlocker(logger, error.code, error.getMessage());
-            publish(RunSnapshot.Status.BLOCKED, "收尾", "需人工处理", error.getMessage());
+            try {
+                resumeBlockedRun(context, config, logger, random, counters, error);
+                if (stopRequested) stopReason = "user";
+                else if (budget != null && budget.exhausted(now())) {
+                    stopReason = budget.exhaustionReason(now());
+                }
+            } catch (UserStopped ignored) {
+                stopReason = "user";
+            } catch (Throwable resumeError) {
+                stopReason = "error:" + resumeError.getClass().getSimpleName();
+                blocked = true;
+                if (logger != null) {
+                    captureBlocker(logger, stopReason, String.valueOf(resumeError.getMessage()));
+                }
+                publish(RunSnapshot.Status.FAILED, "收尾",
+                        "不可恢复错误", String.valueOf(resumeError.getMessage()));
+            }
         } catch (UserStopped ignored) {
             stopReason = "user";
         } catch (Throwable error) {
             stopReason = "error:" + error.getClass().getSimpleName();
             blocked = true;
             if (logger != null) captureBlocker(logger, stopReason, String.valueOf(error.getMessage()));
-            publish(RunSnapshot.Status.BLOCKED, "收尾", "不可恢复错误", String.valueOf(error.getMessage()));
+            publish(RunSnapshot.Status.FAILED, "收尾",
+                    "不可恢复错误", String.valueOf(error.getMessage()));
         } finally {
             long elapsed = budget == null ? 0 : budget.elapsedMs(now());
             int videos = budget == null ? 0 : budget.videosSeen();
@@ -237,6 +282,9 @@ public final class WarmupEngine {
                             .put("not_interested", actions.committedCount("not_interested"))
                             .put("action_counts", actions.currentCountsJson())
                             .put("external_actions_committed", actions.committedTotal())
+                            .put("action_not_applied_counts",
+                                    actions.currentNotAppliedCountsJson())
+                            .put("external_actions_not_applied", actions.notAppliedTotal())
                             .put("partial_video_actions", actions.hasPartialVideoActions())
                             .put("would_likes", counters.wouldLikes)
                             .put("would_favorites", counters.wouldFavorites)
@@ -251,10 +299,100 @@ public final class WarmupEngine {
                 paused = false;
                 pauseRequested = false;
                 stopRequested = false;
+                externalActionInFlight = false;
+                blockedWaiting = false;
                 budget = null;
             }
             if (!blocked) publish(RunSnapshot.Status.FINISHED, "收尾", "已结束", stopReason);
         }
+    }
+
+    /**
+     * A runtime blocker suspends the current run instead of finalizing it. On explicit user
+     * continuation, recovery always re-enters through the recommendation feed and skips the
+     * interrupted item; it never resumes halfway through a search transition or external write.
+     */
+    private void resumeBlockedRun(Context context, WarmupConfig config, RunLogger logger,
+                                  Random random, Counters counters,
+                                  Blocked initialError) throws Exception {
+        if (logger == null) {
+            throw new IllegalStateException("运行日志尚未初始化，无法安全继续", initialError);
+        }
+        Blocked pending = initialError;
+        while (true) {
+            waitForBlockedContinuation(pending, logger);
+            try {
+                publish(RunSnapshot.Status.RUNNING, "恢复检查", "环境复检", "");
+                if (!WarmupAccessibilityService.isConnected()) {
+                    throw new Blocked("accessibility_disabled", "无障碍服务未开启");
+                }
+                AccessibilityGateway gateway = AccessibilityGateway.require();
+                if (!gateway.screenInteractive()) {
+                    throw new Blocked("screen_off", "屏幕未点亮");
+                }
+                if (gateway.deviceLocked()) {
+                    throw new Blocked("device_locked", "设备仍处于锁屏状态");
+                }
+                if (config.requireNetwork && !gateway.networkAvailable()) {
+                    throw new Blocked("network_unavailable", "网络不可用");
+                }
+                if (!gateway.launchTikTok()) {
+                    throw new Blocked("tiktok_launch_failed", "无法重新打开 TikTok");
+                }
+                waitForTikTokForeground(gateway, logger);
+                if (budget == null) {
+                    budget = new RunBudget(SystemClock.elapsedRealtime(),
+                            config.maxMinutes * 60_000L, config.videoCount);
+                }
+                prepareOpeningFeed(gateway, config, logger);
+                returnToRecommendationHome(gateway, config, logger);
+                logger.event("blocked_run_resumed", new JSONObject()
+                        .put("prior_code", pending.code)
+                        .put("videos_seen", budget.videosSeen())
+                        .put("resume_source", WarmupConfig.SOURCE_FEED)
+                        .put("resume_policy", "next_safe_feed_video"));
+                if (budget.exhausted(now())) return;
+
+                // The interrupted item may contain a committed or uncertain external action.
+                // Advance once so no selector or action transaction from that item is replayed.
+                swipeToNext(gateway, config, logger, random, WarmupConfig.SOURCE_FEED);
+                waitCooperative(sample(random, config.pauseMinSeconds * 1000,
+                        config.pauseMaxSeconds * 1000));
+                runFeedPhase(gateway, config, logger, random, counters, config.videoCount);
+                return;
+            } catch (Blocked nextError) {
+                pending = nextError;
+            }
+        }
+    }
+
+    private void waitForBlockedContinuation(Blocked error, RunLogger logger) throws Exception {
+        captureBlocker(logger, error.code, error.getMessage());
+        logger.event("run_interrupted", new JSONObject()
+                .put("code", error.code)
+                .put("message", error.getMessage())
+                .put("resumable", true)
+                .put("videos_seen", budget == null ? 0 : budget.videosSeen()));
+        synchronized (control) {
+            blockedWaiting = true;
+            paused = false;
+            pauseRequested = false;
+            if (budget != null) budget.pause(SystemClock.elapsedRealtime());
+            publish(RunSnapshot.Status.BLOCKED, "任务中断",
+                    "处理后可继续", error.getMessage());
+            while (blockedWaiting && !stopRequested) {
+                try {
+                    control.wait(500);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new UserStopped();
+                }
+            }
+            if (stopRequested) throw new UserStopped();
+        }
+        logger.event("continue_requested", new JSONObject()
+                .put("prior_code", error.code)
+                .put("videos_seen", budget == null ? 0 : budget.videosSeen()));
     }
 
     private void runSearchPhase(AccessibilityGateway gateway, WarmupConfig config, RunLogger logger,
@@ -278,8 +416,13 @@ public final class WarmupEngine {
             throw new Blocked("search_entry_missing", "当前页没有可用搜索入口");
         }
         waitCooperative(800);
-        awaitTransition(gateway, config, logger, PageState.Page.FEED,
+        PageState searchLanding = awaitTransition(gateway, config, logger, PageState.Page.FEED,
                 PageTransitionPolicy.Action.OPEN_SEARCH);
+        logger.event("search_landing", new JSONObject()
+                .put("page", searchLanding.page.name())
+                .put("restored_results",
+                        searchLanding.page == PageState.Page.SEARCH_RESULTS)
+                .put("evidence", new JSONArray(searchLanding.evidence)));
         UiSnapshot searchInputSnapshot = gateway.snapshot();
         ControlResolver.Match searchField = ControlResolver.resolve(
                 searchInputSnapshot, ControlResolver.Role.SEARCH_FIELD);
@@ -290,13 +433,17 @@ public final class WarmupEngine {
         UiSnapshot readyToSubmit = gateway.snapshot();
         ControlResolver.Match refreshedField = ControlResolver.resolve(
                 readyToSubmit, ControlResolver.Role.SEARCH_FIELD);
+        if (refreshedField == null || !keyword.equals(refreshedField.node.text)) {
+            throw new Blocked("search_query_not_ready",
+                    "搜索框未稳定为本次关键词，未提交搜索");
+        }
         ControlResolver.Match submit = ControlResolver.resolve(readyToSubmit,
                 ControlResolver.Role.SEARCH_SUBMIT,
-                refreshedField == null ? null : refreshedField.node);
+                refreshedField.node);
         if (submit == null || !gateway.tapResolvedGesture(
                 ControlResolver.Role.SEARCH_SUBMIT, submit.node,
                 ControlResolver.Role.SEARCH_FIELD,
-                refreshedField == null ? null : refreshedField.node)) {
+                refreshedField.node)) {
             throw new Blocked("search_submit_missing", "无法提交搜索");
         }
         waitCooperative(3000);
@@ -498,7 +645,7 @@ public final class WarmupEngine {
                 : 0;
         int watchMs = baseWatchMs + watchExtraMs;
         publish(RunSnapshot.Status.RUNNING, phase(source), "B · 观看", (watchMs / 1000) + " 秒");
-        waitCooperative(watchMs);
+        waitPauseable(watchMs);
         UiSnapshot watched = gateway.snapshot();
         PageState watchedState = inspect(gateway, config);
         if (watchedState.page != PageState.Page.FEED) {
@@ -574,6 +721,7 @@ public final class WarmupEngine {
                 ? content.matchedKeywords(config.notInterestedKeywords) : new ArrayList<>();
         boolean relevant = !config.interestEnabled || !matched.isEmpty();
         String feedback = "none";
+        String feedbackReason = NotInterestedPolicy.REASON_NONE;
         List<String> comments = new ArrayList<>();
         String likeAction = "none";
         String favoriteAction = "none";
@@ -595,7 +743,8 @@ public final class WarmupEngine {
                             && chance(random, config.commentReadRate)) {
                         publish(RunSnapshot.Status.RUNNING, phase(source), "评论区浏览", "按工作流执行");
                         try {
-                            comments = readComments(gateway, config, logger, random);
+                            comments = readComments(gateway, config, logger, random,
+                                    source, content.fingerprint());
                         } catch (Blocked error) {
                             if (!liveSoftMissing) throw error;
                             logger.event("live_comments_unavailable", new JSONObject()
@@ -612,10 +761,13 @@ public final class WarmupEngine {
                         publish(RunSnapshot.Status.RUNNING, phase(source), "点赞", "按工作流执行");
                         if (plan(random, config.likeRate, counters.likes + counters.wouldLikes, config.maxLikes)
                                 && (!config.likeOnlyIfRelevant || relevant)) {
-                            if (config.interactionsApply && !content.hasStableActionIdentity()) {
+                            if (!counters.actionCircuit.allows("like")) {
+                                likeAction = suppressAction(logger, counters, "like");
+                            } else if (config.interactionsApply && !content.hasStableActionIdentity()) {
                                 likeAction = skipUnstableIdentity(logger, "like", content);
                             } else {
-                                likeAction = interactButton(gateway, logger, ControlResolver.Role.VIDEO_LIKE,
+                                likeAction = interactButton(
+                                        gateway, logger, ControlResolver.Role.VIDEO_LIKE,
                                         "like", actionTarget, config.interactionsApply, counters,
                                         liveSoftMissing);
                             }
@@ -628,10 +780,13 @@ public final class WarmupEngine {
                         if (plan(random, config.favoriteRate,
                                 counters.favorites + counters.wouldFavorites, config.maxFavorites)
                                 && (!config.favoriteOnlyIfRelevant || relevant)) {
-                            if (config.interactionsApply && !content.hasStableActionIdentity()) {
+                            if (!counters.actionCircuit.allows("favorite")) {
+                                favoriteAction = suppressAction(logger, counters, "favorite");
+                            } else if (config.interactionsApply && !content.hasStableActionIdentity()) {
                                 favoriteAction = skipUnstableIdentity(logger, "favorite", content);
                             } else {
-                                favoriteAction = interactButton(gateway, logger, ControlResolver.Role.VIDEO_FAVORITE,
+                                favoriteAction = interactButton(
+                                        gateway, logger, ControlResolver.Role.VIDEO_FAVORITE,
                                         "favorite", actionTarget, config.interactionsApply, counters,
                                         liveSoftMissing);
                             }
@@ -640,7 +795,6 @@ public final class WarmupEngine {
                     break;
                 case WarmupConfig.STEP_COMMENT:
                     if (config.commentEnabled) {
-                        publish(RunSnapshot.Status.RUNNING, phase(source), "评论", "按工作流执行");
                         if ((!config.commentOnlyIfRelevant || relevant)
                                 && plan(random, config.commentRate,
                                 counters.comments + counters.wouldComments, config.maxComments)) {
@@ -651,13 +805,34 @@ public final class WarmupEngine {
                             int pick = "sequential".equals(config.commentOrder)
                                     ? (counters.comments + counters.wouldComments) % candidates.size()
                                     : random.nextInt(candidates.size());
-                            commentText = candidates.get(pick);
+                            final String selectedCommentText = candidates.get(pick);
+                            commentText = selectedCommentText;
                             if (config.interactionsApply && !content.hasStableActionIdentity()) {
                                 commentAction = skipUnstableIdentity(logger, "comment", content);
                             } else {
+                                ActionLedger.BeginResult existing = config.interactionsApply
+                                        ? logger.actions().probe("comment", actionTarget,
+                                        selectedCommentText) : null;
+                                if (existing != null && !existing.allowed()) {
+                                    if (existing.disposition
+                                            == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED
+                                            || existing.disposition
+                                            == ActionLedger.BeginDisposition.DUPLICATE_NOT_APPLIED) {
+                                        logDuplicate(logger, "comment", existing);
+                                        commentAction = existing.disposition
+                                                == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED
+                                                ? "already_recorded" : "prior_not_applied";
+                                        break;
+                                    }
+                                    throw duplicateUncertain("comment", existing);
+                                }
+                                publish(RunSnapshot.Status.RUNNING, phase(source),
+                                        "评论", "已通过概率、上限与去重预检");
                                 try {
-                                    commentAction = interactComment(gateway, config, logger, commentText,
-                                            actionTarget, config.interactionsApply, counters);
+                                    commentAction = interactComment(
+                                            gateway, config, logger, selectedCommentText,
+                                            actionTarget, config.interactionsApply, counters,
+                                            source, content.fingerprint());
                                 } catch (Blocked error) {
                                     // Write-comment is optional for the session: open failures / UI
                                     // races must not stop the whole run (same spirit as readComments).
@@ -686,7 +861,8 @@ public final class WarmupEngine {
                                 followAction = skipUnstableIdentity(logger, "follow", content);
                             } else {
                                 try {
-                                    followAction = interactFollow(gateway, logger, actionTarget, counters);
+                                    followAction = interactFollow(
+                                            gateway, logger, actionTarget, counters);
                                 } catch (Blocked error) {
                                     if (!liveSoftMissing) throw error;
                                     followAction = "unavailable";
@@ -719,10 +895,17 @@ public final class WarmupEngine {
                     }
                     break;
                 case WarmupConfig.STEP_NOT_INTERESTED:
-                    if (config.notInterestedEnabled) {
-                        publish(RunSnapshot.Status.RUNNING, phase(source), "不感兴趣", "匹配负向关键词");
-                        if (!matchedNotInterested.isEmpty()
-                                && plan(random, config.notInterestedRate,
+                    if (config.hasNotInterestedTrigger()) {
+                        NotInterestedPolicy.Decision decision = NotInterestedPolicy.decide(
+                                config, matchedNotInterested, relevant);
+                        if (decision.shouldPlan) {
+                            feedbackReason = decision.reason;
+                            publish(RunSnapshot.Status.RUNNING, phase(source), "不感兴趣",
+                                    NotInterestedPolicy.REASON_INTEREST_MISS.equals(decision.reason)
+                                            ? "未命中正向兴趣关键词" : "命中负向关键词");
+                        }
+                        if (decision.shouldPlan
+                                && plan(random, decision.rate,
                                 counters.notInterested + counters.wouldNotInterested,
                                 config.maxNotInterested)) {
                             if (!config.interactionsApply) {
@@ -733,8 +916,9 @@ public final class WarmupEngine {
                                     feedback = skipUnstableIdentity(logger, "not_interested", content);
                                 } else {
                                     try {
-                                        feedback = applyNotInterested(gateway, logger, actionTarget,
-                                                matchedNotInterested, counters);
+                                        feedback = applyNotInterested(
+                                                gateway, logger, actionTarget,
+                                                decision.matchedKeywords, decision.reason, counters);
                                     } catch (Blocked error) {
                                         if (!liveSoftMissing) throw error;
                                         feedback = "unavailable";
@@ -766,6 +950,7 @@ public final class WarmupEngine {
                 .put("matched_not_interested_keywords", new JSONArray(matchedNotInterested))
                 .put("comments", new JSONArray(comments))
                 .put("feedback", feedback)
+                .put("feedback_reason", feedbackReason)
                 .put("like_action", likeAction)
                 .put("favorite_action", favoriteAction)
                 .put("comment_action", commentAction)
@@ -787,9 +972,18 @@ public final class WarmupEngine {
     }
 
     private List<String> readComments(AccessibilityGateway gateway, WarmupConfig config,
-                                      RunLogger logger, Random random) throws Exception {
+                                      RunLogger logger, Random random, String source,
+                                      String expectedVideoFingerprint) throws Exception {
+        UiSnapshot entrySnapshot = gateway.snapshot();
         ControlResolver.Match commentEntry = ControlResolver.resolve(
-                gateway.snapshot(), ControlResolver.Role.VIDEO_COMMENTS);
+                entrySnapshot, ControlResolver.Role.VIDEO_COMMENTS);
+        if (commentEntry != null && ControlResolver.isDefinitelyEmptyCommentEntry(
+                entrySnapshot, commentEntry.node)) {
+            logger.event("comments_browse_skipped", new JSONObject()
+                    .put("reason", "entry_explicitly_empty")
+                    .put("entry", nodeDetail(commentEntry.node)));
+            return new ArrayList<>();
+        }
         if (commentEntry == null || !gateway.tapResolvedGesture(
                 ControlResolver.Role.VIDEO_COMMENTS, commentEntry.node)) {
             logger.event("comments_unavailable", new JSONObject());
@@ -806,17 +1000,39 @@ public final class WarmupEngine {
             logger.event("comments_open_failed_soft", new JSONObject()
                     .put("code", openError.code)
                     .put("message", openError.getMessage()));
-            gateway.pressBack();
-            waitCooperative(400);
+            cleanupOptionalCommentSurface(gateway, config, logger, source,
+                    expectedVideoFingerprint);
             return new ArrayList<>();
         }
         if (state.page != PageState.Page.COMMENTS) {
             logger.event("comments_not_opened_soft", new JSONObject()
                     .put("page", state.page.name())
                     .put("evidence", new JSONArray(state.evidence)));
-            gateway.pressBack();
-            waitCooperative(400);
+            cleanupOptionalCommentSurface(gateway, config, logger, source,
+                    expectedVideoFingerprint);
             return new ArrayList<>();
+        }
+        UiSnapshot openedSnapshot = gateway.snapshot();
+        CommentSurfaceContract.Result openedSurface =
+                CommentSurfaceContract.analyze(openedSnapshot);
+        if (openedSurface.inputSurface.inputActive()) {
+            boolean dismissed = gateway.dismissInputMethodIfPresent();
+            logger.event("comments_browse_input_normalized", new JSONObject()
+                    .put("reason", "composer_auto_focused_by_tiktok")
+                    .put("dispatched", dismissed)
+                    .put("before", openedSurface.toJson()));
+            waitCooperative(450);
+            CommentSurfaceContract.Result normalized =
+                    CommentSurfaceContract.analyze(gateway.snapshot());
+            if (!normalized.panelOpen() || normalized.inputSurface.inputActive()) {
+                logger.event("comments_browse_skipped", new JSONObject()
+                        .put("reason", normalized.inputSurface.inputActive()
+                                ? "input_surface_remained_active"
+                                : "oem_back_closed_panel")
+                        .put("after", normalized.toJson()));
+                closeComments(gateway, config, logger, source, expectedVideoFingerprint);
+                return new ArrayList<>();
+            }
         }
         // Optional dwell after open (config range), without blocking if already empty panel.
         waitCooperative(sample(random, config.commentMinSeconds * 1000, config.commentMaxSeconds * 1000));
@@ -849,16 +1065,7 @@ public final class WarmupEngine {
                 waitCooperative(sample(random, 800, 1800));
             }
         }
-        ControlResolver.Match close = ControlResolver.resolve(
-                gateway.snapshot(), ControlResolver.Role.COMMENT_CLOSE);
-        if (close == null || !gateway.tapResolvedGesture(
-                ControlResolver.Role.COMMENT_CLOSE, close.node)) gateway.pressBack();
-        waitCooperative(700);
-        PageState closed = awaitTransition(gateway, config, logger, PageState.Page.COMMENTS,
-                PageTransitionPolicy.Action.CLOSE_COMMENTS);
-        if (closed.page != PageState.Page.FEED) {
-            throw new Blocked("comments_not_closed", "关闭评论区后未回到稳定视频页");
-        }
+        closeComments(gateway, config, logger, source, expectedVideoFingerprint);
         logger.event("comments_read", new JSONObject()
                 .put("count", comments.size())
                 .put("reply_threads", expanded)
@@ -866,6 +1073,181 @@ public final class WarmupEngine {
                 .put("performed_scrolls", performedScrolls)
                 .put("scroll_random", config.commentScrollRandom));
         return new ArrayList<>(comments);
+    }
+
+    /** Do nothing when the open tap missed; invoke guarded close only when modal evidence exists. */
+    private void cleanupOptionalCommentSurface(AccessibilityGateway gateway, WarmupConfig config,
+                                               RunLogger logger, String source,
+                                               String expectedVideoFingerprint) throws Exception {
+        CommentSurfaceContract.Result comments =
+                CommentSurfaceContract.analyze(gateway.snapshot());
+        if (!comments.blocksFeedClassification() && !comments.inputSurface.inputActive()) return;
+        logger.event("comments_optional_cleanup", comments.toJson());
+        closeComments(gateway, config, logger, source, expectedVideoFingerprint);
+    }
+
+    /**
+     * Close comments as a guarded modal transition. BACK may hide only the IME or may close both
+     * IME and panel depending on the keyboard/OEM, so every action is followed by fresh evidence.
+     */
+    private void closeComments(AccessibilityGateway gateway, WarmupConfig config,
+                               RunLogger logger, String source,
+                               String expectedVideoFingerprint) throws Exception {
+        boolean inputDismissed = false;
+        boolean closeTapped = false;
+        boolean fallbackBack = false;
+        int consecutiveWindowGaps = 0;
+        boolean focusRefreshAttempted = false;
+        CommentCloseCoordinator.OriginStatus lastOriginStatus =
+                CommentCloseCoordinator.OriginStatus.WAITING;
+        for (int step = 0; step < 8; step++) {
+            UiSnapshot before = gateway.snapshot();
+            CommentCloseCoordinator.Decision decision = CommentCloseCoordinator.decide(
+                    before, new CommentCloseCoordinator.Attempts(
+                            inputDismissed, closeTapped, fallbackBack));
+            JSONObject detail = new JSONObject()
+                    .put("step", step + 1)
+                    .put("action", decision.action.name())
+                    .put("reason", decision.reason)
+                    .put("comment_surface", decision.comments.toJson());
+
+            switch (decision.action) {
+                case HIDE_INPUT_SURFACE:
+                    inputDismissed = true;
+                    boolean inputAction = gateway.dismissInputMethodIfPresent();
+                    logger.event("comment_close_step", detail.put("dispatched", inputAction));
+                    waitCooperative(320);
+                    break;
+                case TAP_CLOSE:
+                    closeTapped = true;
+                    boolean closeAction = gateway.tapResolvedGesture(
+                            ControlResolver.Role.COMMENT_CLOSE, decision.comments.close);
+                    logger.event("comment_close_step", detail.put("dispatched", closeAction));
+                    waitCooperative(450);
+                    break;
+                case FALLBACK_BACK:
+                    fallbackBack = true;
+                    boolean backAction = gateway.pressBack();
+                    logger.event("comment_close_step", detail.put("dispatched", backAction));
+                    waitCooperative(450);
+                    break;
+                case VERIFY_ORIGIN:
+                    logger.event("comment_close_step", detail);
+                    CommentCloseCoordinator.OriginStatus origin =
+                            verifyClosedCommentOrigin(gateway, config, logger, source,
+                                    expectedVideoFingerprint);
+                    lastOriginStatus = origin;
+                    if (origin == CommentCloseCoordinator.OriginStatus.VERIFIED) {
+                        return;
+                    }
+                    if (origin == CommentCloseCoordinator.OriginStatus.WINDOW_GAP) {
+                        consecutiveWindowGaps++;
+                        if ("feed".equals(source) && consecutiveWindowGaps >= 2
+                                && !focusRefreshAttempted) {
+                            focusRefreshAttempted = true;
+                            boolean launched = gateway.launchTikTok();
+                            logger.event("accessibility_window_recovery", new JSONObject()
+                                    .put("scope", "comment_close_origin")
+                                    .put("action", "reorder_tiktok_to_front")
+                                    .put("dispatched", launched)
+                                    .put("same_video_required", true));
+                            waitCooperative(900);
+                            break;
+                        }
+                    } else {
+                        consecutiveWindowGaps = 0;
+                    }
+                    waitCooperative(320);
+                    break;
+                case BLOCK:
+                default:
+                    logger.event("comment_close_step", detail);
+                    if (lastOriginStatus == CommentCloseCoordinator.OriginStatus.WINDOW_GAP) {
+                        captureDiagnostic(logger, "accessibility-window-gap");
+                        throw new Blocked("accessibility_window_gap",
+                                "评论区已关闭，但无障碍窗口观测持续中断");
+                    }
+                    captureDiagnostic(logger, "comments-close-unverified");
+                    throw new Blocked("comments_close_unverified",
+                            "评论区或输入界面仍存在，有限恢复已用完");
+            }
+        }
+        if (lastOriginStatus == CommentCloseCoordinator.OriginStatus.WINDOW_GAP) {
+            captureDiagnostic(logger, "accessibility-window-gap");
+            throw new Blocked("accessibility_window_gap",
+                    "评论区已关闭，但无障碍窗口观测持续中断"
+                            + ("search".equals(source)
+                            ? "；搜索详情页不能通过重启 TikTok 猜测恢复" : "；一次焦点恢复后仍不可读"));
+        }
+        captureDiagnostic(logger, "comments-close-unverified");
+        throw new Blocked("comments_close_unverified",
+                "评论区关闭后，来源页面未在期限内通过完整契约验证");
+    }
+
+    private CommentCloseCoordinator.OriginStatus verifyClosedCommentOrigin(
+                                              AccessibilityGateway gateway, WarmupConfig config,
+                                              RunLogger logger, String source,
+                                              String expectedVideoFingerprint) throws Exception {
+        UiSnapshot firstSnapshot = gateway.snapshot();
+        PageState firstPage = PageAnalyzer.analyze(firstSnapshot,
+                !config.requireNetwork || gateway.networkAvailable());
+        CommentSurfaceContract.Result firstComments =
+                CommentSurfaceContract.analyze(firstSnapshot);
+        VideoSurfaceContext.Result firstContext = VideoSurfaceContext.analyze(firstSnapshot);
+        VideoContent firstContent = VideoContent.from(firstSnapshot);
+        String firstFingerprint = firstContent.fingerprint();
+
+        waitCooperative(320);
+
+        UiSnapshot secondSnapshot = gateway.snapshot();
+        PageState secondPage = PageAnalyzer.analyze(secondSnapshot,
+                !config.requireNetwork || gateway.networkAvailable());
+        CommentSurfaceContract.Result secondComments =
+                CommentSurfaceContract.analyze(secondSnapshot);
+        VideoSurfaceContext.Result secondContext = VideoSurfaceContext.analyze(secondSnapshot);
+        VideoContent secondContent = VideoContent.from(secondSnapshot);
+        String secondFingerprint = secondContent.fingerprint();
+
+        PageState stablePage = PageStability.consecutive(firstPage, secondPage);
+        VideoSurfaceContext.Result stableContext =
+                VideoSurfaceContext.consecutive(firstContext, secondContext);
+        VideoSurfaceContext.Kind expectedContext = "search".equals(source)
+                ? VideoSurfaceContext.Kind.SEARCH_DETAIL
+                : VideoSurfaceContext.Kind.RECOMMENDATION_HOME;
+        boolean fingerprintStable = expectedVideoFingerprint == null
+                || expectedVideoFingerprint.isEmpty()
+                || VideoContent.matchesFingerprint(expectedVideoFingerprint, firstContent)
+                && VideoContent.matchesFingerprint(expectedVideoFingerprint, secondContent);
+        boolean commentsClosed = firstComments.closedForOriginVerification()
+                && secondComments.closedForOriginVerification();
+        boolean transitionAllowed = PageTransitionPolicy.allows(
+                PageState.Page.COMMENTS, stablePage,
+                PageTransitionPolicy.Action.CLOSE_COMMENTS);
+        boolean expectedContextObserved = stableContext.kind == expectedContext;
+        CommentCloseCoordinator.OriginStatus status =
+                CommentCloseCoordinator.classifyOrigin(firstPage, secondPage,
+                        commentsClosed, transitionAllowed,
+                        expectedContextObserved, fingerprintStable);
+
+        JSONObject detail = new JSONObject()
+                .put("verified", status == CommentCloseCoordinator.OriginStatus.VERIFIED)
+                .put("origin_status", status.name())
+                .put("expected_context", expectedContext.name())
+                .put("observed_context", stableContext.kind.name())
+                .put("page", stablePage.page.name())
+                .put("page_evidence", new JSONArray(stablePage.evidence))
+                .put("context_evidence", new JSONArray(stableContext.evidence))
+                .put("first_comment_surface", firstComments.toJson())
+                .put("second_comment_surface", secondComments.toJson())
+                .put("fingerprint_available",
+                        expectedVideoFingerprint != null && !expectedVideoFingerprint.isEmpty())
+                .put("observed_fingerprint_stable",
+                        !firstFingerprint.isEmpty() && firstFingerprint.equals(secondFingerprint))
+                .put("fingerprint_stable", fingerprintStable);
+        logger.event(status == CommentCloseCoordinator.OriginStatus.VERIFIED
+                        ? "comment_close_verified" : "comment_close_verification_wait",
+                detail);
+        return status;
     }
 
     private String interactButton(AccessibilityGateway gateway, RunLogger logger,
@@ -883,10 +1265,23 @@ public final class WarmupEngine {
             }
             throw new Blocked(name + "_button_missing", "找不到" + name + "按钮");
         }
-        if ("like".equals(name) && isLikeSelected(before)) return "already_liked";
+        if ("like".equals(name) && isLikeSelected(before)) {
+            counters.actionCircuit.recordApplied(name);
+            return "already_liked";
+        }
         FavoriteVisualEvidence.Profile favoriteBefore = "favorite".equals(name)
                 ? gateway.favoriteVisualState(before) : FavoriteVisualEvidence.unavailable();
-        if ("favorite".equals(name) && favoriteBefore.selected()) return "already_favorited";
+        if ("favorite".equals(name)) {
+            if (!favoriteBefore.available) {
+                logger.event("favorite_state_unavailable", nodeDetail(before)
+                        .put("reason", "pre_action_visual_evidence_unavailable"));
+                return "state_unavailable";
+            }
+            if (favoriteBefore.selected()) {
+                counters.actionCircuit.recordApplied(name);
+                return "already_favorited";
+            }
+        }
         if (!apply) {
             if ("like".equals(name)) counters.wouldLikes++; else counters.wouldFavorites++;
             logger.event("would_" + name, new JSONObject());
@@ -897,62 +1292,105 @@ public final class WarmupEngine {
             preparedEvidence.put("favorite_before_yellow_ratio", favoriteBefore.yellowRatio)
                     .put("favorite_before_available", favoriteBefore.available);
         }
-        ActionLedger.Transaction transaction = beginAction(
-                logger, name, target, "", preparedEvidence);
-        if (transaction == null) return "already_recorded";
-        transaction.attempted(new JSONObject(preparedEvidence.toString()));
-        if (!gateway.tapResolvedGesture(role, before)) {
-            transaction.unknown("click_not_acknowledged", nodeDetail(before));
-            throw new Blocked(name + "_result_unknown", name + "点击结果不明确，已停止且不会重试");
-        }
+        beginExternalAction();
+        try {
+            ActionLedger.Transaction transaction = beginAction(
+                    logger, name, target, "", preparedEvidence);
+            if (transaction == null) return "already_recorded";
+            transaction.attempted(new JSONObject(preparedEvidence.toString()));
+            if (!gateway.tapResolvedGesture(role, before)) {
+                transaction.unknown("click_not_acknowledged", nodeDetail(before));
+                throw new Blocked(name + "_result_unknown", name + "点击结果不明确，已停止且不会重试");
+            }
 
-        // A write is never repeated. Poll only the same on-screen control while TikTok updates its
-        // accessibility state; adjacent videos use the same resource ID and must not be observed.
-        boolean verified = false;
-        FavoriteVisualEvidence.Profile favoriteAfter = FavoriteVisualEvidence.unavailable();
-        for (int attempt = 0; attempt < 6 && !verified; attempt++) {
-            waitCooperative(attempt == 0 ? 500 : 400);
-            UiSnapshot observed = gateway.snapshot();
-            PageState observedState = PageAnalyzer.analyze(observed, true);
-            boolean sameVideo = observedState.page == PageState.Page.FEED
-                    && beforeFingerprint.equals(VideoContent.from(observed).fingerprint());
-            if ("like".equals(name)) {
-                UiNode after = gateway.visibleRightActionNear(before, "点赞的视频", "liked video");
-                verified = sameVideo && after != null && isLikeSelected(after);
-            } else {
-                // TikTok exposes the same accessibility label before and after. Require a colour
-                // transition at the captured control and keep the readback on the same video.
-                favoriteAfter = gateway.favoriteVisualState(before);
-                verified = sameVideo && FavoriteVisualEvidence.transitionedToSelected(
-                        favoriteBefore, favoriteAfter);
+            // A write is never repeated. Poll only the same on-screen control while TikTok updates
+            // its accessibility state; adjacent videos reuse IDs and must not be observed.
+            ToggleActionOutcome.State outcome = ToggleActionOutcome.State.UNKNOWN;
+            FavoriteVisualEvidence.Profile favoriteAfter = FavoriteVisualEvidence.unavailable();
+            int stableUnselectedSamples = 0;
+            boolean sameVideo = false;
+            boolean sameTarget = false;
+            boolean afterStateAvailable = false;
+            boolean afterSelected = false;
+            for (int attempt = 0; attempt < 6
+                    && outcome != ToggleActionOutcome.State.SELECTED; attempt++) {
+                waitCooperative(attempt == 0 ? 500 : 400);
+                UiSnapshot observed = gateway.snapshot();
+                PageState observedState = PageAnalyzer.analyze(observed, true);
+                sameVideo = observedState.page == PageState.Page.FEED
+                        && beforeFingerprint.equals(VideoContent.from(observed).fingerprint());
+                ControlResolver.Match afterResolved = ControlResolver.resolve(observed, role);
+                UiNode after = afterResolved == null ? null : afterResolved.node;
+                sameTarget = after != null
+                        && GestureTargetContract.sameVisibleTarget(observed, before, after);
+                if ("like".equals(name)) {
+                    afterStateAvailable = after != null;
+                    afterSelected = afterStateAvailable && isLikeSelected(after);
+                } else {
+                    // TikTok exposes the same accessibility label before and after. Require a
+                    // colour transition at a freshly resolved instance of the same control.
+                    favoriteAfter = after == null
+                            ? FavoriteVisualEvidence.unavailable()
+                            : gateway.favoriteVisualState(after);
+                    afterStateAvailable = favoriteAfter.available;
+                    afterSelected = FavoriteVisualEvidence.transitionedToSelected(
+                            favoriteBefore, favoriteAfter);
+                }
+                if (sameVideo && sameTarget && afterStateAvailable && !afterSelected) {
+                    stableUnselectedSamples++;
+                } else {
+                    stableUnselectedSamples = 0;
+                }
+                outcome = ToggleActionOutcome.classify(
+                        true, afterStateAvailable, afterSelected, sameVideo, sameTarget,
+                        stableUnselectedSamples);
             }
-        }
-        if (!verified) {
-            JSONObject failure = nodeDetail(before).put("same_video_fingerprint", beforeFingerprint);
+            if (outcome != ToggleActionOutcome.State.SELECTED) {
+                JSONObject failure = nodeDetail(before).put(
+                                "same_video_fingerprint", beforeFingerprint)
+                        .put("same_video", sameVideo)
+                        .put("same_target", sameTarget)
+                        .put("after_state_available", afterStateAvailable)
+                        .put("stable_unselected_samples", stableUnselectedSamples);
+                if ("favorite".equals(name)) {
+                    failure.put("favorite_before_yellow_ratio", favoriteBefore.yellowRatio)
+                            .put("favorite_after_yellow_ratio", favoriteAfter.yellowRatio)
+                            .put("favorite_after_available", favoriteAfter.available);
+                }
+                if (outcome == ToggleActionOutcome.State.NOT_APPLIED) {
+                    ActionCircuitBreaker.Snapshot circuit =
+                            counters.actionCircuit.recordNotApplied(name);
+                    failure.put("consecutive_not_applied", circuit.consecutiveNotApplied)
+                            .put("module_suppressed", circuit.suppressed);
+                    transaction.notApplied("stable_state_unchanged", failure);
+                    logger.event(name + "_not_applied", failure);
+                    return "not_applied";
+                }
+                transaction.unknown("verification_failed", failure);
+                throw new Blocked(name + "_result_unknown",
+                        name + "结果不明确，为避免重复操作已停止");
+            }
+            JSONObject evidence = nodeDetail(before).put("verified", true)
+                    .put("dispatch", "gesture_only");
             if ("favorite".equals(name)) {
-                failure.put("favorite_before_yellow_ratio", favoriteBefore.yellowRatio)
-                        .put("favorite_after_yellow_ratio", favoriteAfter.yellowRatio)
-                        .put("favorite_after_available", favoriteAfter.available);
+                evidence.put("favorite_before_yellow_ratio", favoriteBefore.yellowRatio)
+                        .put("favorite_after_yellow_ratio", favoriteAfter.yellowRatio);
             }
-            transaction.unknown("verification_failed", failure);
-            throw new Blocked(name + "_result_unknown", name + "结果不明确，为避免重复操作已停止");
+            transaction.verified(evidence);
+            transaction.committed(evidence);
+            counters.actionCircuit.recordApplied(name);
+            if ("like".equals(name)) counters.likes++; else counters.favorites++;
+            logger.event(name, evidence);
+            return name + "d";
+        } finally {
+            endExternalAction();
         }
-        JSONObject evidence = nodeDetail(before).put("verified", true)
-                .put("dispatch", "gesture_only");
-        if ("favorite".equals(name)) {
-            evidence.put("favorite_before_yellow_ratio", favoriteBefore.yellowRatio)
-                    .put("favorite_after_yellow_ratio", favoriteAfter.yellowRatio);
-        }
-        transaction.verified(evidence);
-        transaction.committed(evidence);
-        if ("like".equals(name)) counters.likes++; else counters.favorites++;
-        logger.event(name, evidence);
-        return name + "d";
     }
 
     private String interactComment(AccessibilityGateway gateway, WarmupConfig config,
                                    RunLogger logger, String text,
-                                   String target, boolean apply, Counters counters) throws Exception {
+                                   String target, boolean apply, Counters counters,
+                                   String source, String expectedVideoFingerprint) throws Exception {
         if (!apply) {
             counters.wouldComments++;
             logger.event("would_comment", new JSONObject().put("text", text));
@@ -1010,90 +1448,86 @@ public final class WarmupEngine {
             gateway.pressBack();
             throw new Blocked("comment_send_missing", "找不到评论框右侧的发送按钮，已清空草稿");
         }
-        ActionLedger.BeginResult begin = logger.actions().begin(
-                "comment", target, text, nodeDetail(send));
-        if (!begin.allowed()) {
-            clearResolvedInput(gateway, ControlResolver.Role.COMMENT_FIELD);
-            gateway.pressBack();
-            if (begin.disposition == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED) {
-                logDuplicate(logger, "comment", begin);
-                return "already_recorded";
-            }
-            throw duplicateUncertain("comment", begin);
-        }
-        ActionLedger.Transaction transaction = begin.transaction;
-        transaction.attempted(nodeDetail(send));
-        if (!gateway.tapResolvedGesture(ControlResolver.Role.COMMENT_SEND, send,
-                ControlResolver.Role.COMMENT_FIELD, composer)) {
-            transaction.unknown("click_not_acknowledged", nodeDetail(send));
-            captureDiagnostic(logger, "comment-send-before-cleanup");
-            clearResolvedInput(gateway, ControlResolver.Role.COMMENT_FIELD);
-            gateway.pressBack();
-            throw new Blocked("comment_result_unknown", "评论发送结果不明确，已停止且不会重试");
-        }
-        waitCooperative(1200);
-        UiSnapshot resultSnapshot = gateway.snapshot();
-        ControlResolver.Match resultField = ControlResolver.resolve(
-                resultSnapshot, ControlResolver.Role.COMMENT_FIELD);
-        UiNode field = resultField == null ? null : resultField.node;
-        if (field != null && text.equals(field.text)) {
-            transaction.unknown("draft_still_present", nodeDetail(field));
-            captureDiagnostic(logger, "comment-result-before-cleanup");
-            clearResolvedInput(gateway, ControlResolver.Role.COMMENT_FIELD);
-            throw new Blocked("comment_result_unknown", "评论发送结果不明确，已停止且不会重试");
-        }
-        JSONObject evidence = new JSONObject().put("draft_cleared", true);
-        transaction.verified(evidence);
-        transaction.committed(evidence);
-        counters.comments++;
-        logger.event("comment", new JSONObject().put("verified", true));
-        // Sending a comment often leaves the panel open (or mid-animation). Always return to a
-        // stable FEED contract so the next workflow step does not hit unexpected_page UNKNOWN.
-        boolean closed = false;
-        for (int attempt = 0; attempt < 3 && !closed; attempt++) {
-            ControlResolver.Match close = ControlResolver.resolve(
-                    gateway.snapshot(), ControlResolver.Role.COMMENT_CLOSE);
-            if (close != null) {
-                gateway.tapResolvedGesture(ControlResolver.Role.COMMENT_CLOSE, close.node);
-            } else {
+        beginExternalAction();
+        try {
+            ActionLedger.BeginResult begin = logger.actions().begin(
+                    "comment", target, text, nodeDetail(send));
+            if (!begin.allowed()) {
+                clearResolvedInput(gateway, ControlResolver.Role.COMMENT_FIELD);
                 gateway.pressBack();
+                if (begin.disposition == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED) {
+                    logDuplicate(logger, "comment", begin);
+                    return "already_recorded";
+                }
+                throw duplicateUncertain("comment", begin);
             }
-            waitCooperative(attempt == 0 ? 700 : 500);
-            PageState afterClose = inspect(gateway, config);
-            if (afterClose.page == PageState.Page.FEED
-                    && !afterClose.interruptions.contains("comments_open")) {
-                closed = true;
-                break;
+            ActionLedger.Transaction transaction = begin.transaction;
+            transaction.attempted(nodeDetail(send));
+            if (!gateway.tapResolvedGesture(ControlResolver.Role.COMMENT_SEND, send,
+                    ControlResolver.Role.COMMENT_FIELD, composer)) {
+                transaction.unknown("click_not_acknowledged", nodeDetail(send));
+                captureDiagnostic(logger, "comment-send-before-cleanup");
+                clearResolvedInput(gateway, ControlResolver.Role.COMMENT_FIELD);
+                gateway.pressBack();
+                throw new Blocked("comment_result_unknown", "评论发送结果不明确，已停止且不会重试");
             }
-            // Partial composer / UNKNOWN: keep pressing back / close.
-            if (afterClose.page == PageState.Page.COMMENTS
-                    || afterClose.interruptions.contains("comments_open")) {
-                logger.event("comment_panel_still_open", new JSONObject()
-                        .put("attempt", attempt + 1)
-                        .put("page", afterClose.page.name())
-                        .put("evidence", new JSONArray(afterClose.evidence)));
+            waitCooperative(1200);
+            int consecutivePostedSamples = 0;
+            UiNode lastField = null;
+            int verificationSamples = 0;
+            boolean draftCleared = false;
+            for (int sample = 0; sample < 4; sample++) {
+                UiSnapshot resultSnapshot = gateway.snapshot();
+                verificationSamples++;
+                ControlResolver.Match resultField = ControlResolver.resolve(
+                        resultSnapshot, ControlResolver.Role.COMMENT_FIELD);
+                lastField = resultField == null ? null : resultField.node;
+                draftCleared = lastField == null || !text.equals(lastField.text);
+                boolean visibleNow = CommentSurfaceContract.postedCommentVisible(
+                        resultSnapshot, text);
+                consecutivePostedSamples = visibleNow && draftCleared
+                        ? consecutivePostedSamples + 1 : 0;
+                if (consecutivePostedSamples >= 2) break;
+                waitCooperative(450);
             }
+            boolean postedVisible = consecutivePostedSamples >= 2;
+            JSONObject evidence = new JSONObject()
+                    .put("draft_cleared", draftCleared)
+                    .put("posted_comment_visible", postedVisible)
+                    .put("consecutive_posted_samples", consecutivePostedSamples)
+                    .put("stable_samples", verificationSamples);
+            if (!draftCleared || !postedVisible) {
+                transaction.unknown(draftCleared
+                                ? "posted_comment_not_visible" : "draft_still_present",
+                        evidence);
+                captureDiagnostic(logger, "comment-result-before-cleanup");
+                if (!draftCleared) clearResolvedInput(
+                        gateway, ControlResolver.Role.COMMENT_FIELD);
+                throw new Blocked("comment_result_unknown",
+                        "评论发送结果无法由评论列表确认，已停止且不会重试");
+            }
+            transaction.verified(evidence);
+            transaction.committed(evidence);
+            counters.comments++;
+            logger.event("comment", new JSONObject()
+                    .put("verified", true)
+                    .put("draft_cleared", true)
+                    .put("posted_comment_visible", true));
+        } finally {
+            endExternalAction();
         }
-        if (!closed) {
-            try {
-                ensureExpected(gateway, PageState.Page.FEED, config, logger);
-                closed = true;
-            } catch (Blocked closeError) {
-                logger.event("comment_close_unverified", new JSONObject()
-                        .put("code", closeError.code)
-                        .put("message", closeError.getMessage()));
-                // Comment already committed — soft-continue if we can still see video actions.
-                PageState soft = inspect(gateway, config);
-                if (soft.page == PageState.Page.FEED) closed = true;
-            }
-        }
-        logger.event("comment_closed", new JSONObject().put("closed_to_feed", closed));
+        // The external write is committed, but navigation still must use the same guarded close
+        // contract as read-only comment browsing. Never continue from a guessed FEED state.
+        closeComments(gateway, config, logger, source, expectedVideoFingerprint);
+        logger.event("comment_closed", new JSONObject()
+                .put("closed_to_feed", true)
+                .put("guarded_contract", true));
         return "commented";
     }
 
     private String applyNotInterested(AccessibilityGateway gateway, RunLogger logger,
                                       String target, List<String> matchedKeywords,
-                                      Counters counters) throws Exception {
+                                      String reason, Counters counters) throws Exception {
         if (!gateway.longPressCenter(800)) throw new Blocked("not_interested_menu_failed", "无法打开视频菜单");
         waitCooperative(900);
         ControlResolver.Match entry = ControlResolver.resolve(
@@ -1103,34 +1537,41 @@ public final class WarmupEngine {
             gateway.pressBack();
             throw new Blocked("not_interested_missing", "菜单中没有“不感兴趣”");
         }
-        ActionLedger.Transaction transaction = beginAction(logger, "not_interested",
-                target, "", nodeDetail(entry.node));
-        if (transaction == null) {
-            gateway.pressBack();
-            return "already_recorded";
+        beginExternalAction();
+        try {
+            ActionLedger.Transaction transaction = beginAction(logger, "not_interested",
+                    target, "", nodeDetail(entry.node));
+            if (transaction == null) {
+                gateway.pressBack();
+                return "already_recorded";
+            }
+            transaction.attempted(nodeDetail(entry.node));
+            if (!gateway.tapResolvedGesture(ControlResolver.Role.NOT_INTERESTED, entry.node)) {
+                transaction.unknown("click_not_acknowledged", nodeDetail(entry.node));
+                throw new Blocked("not_interested_result_unknown", "不感兴趣结果不明确，未重复操作");
+            }
+            waitCooperative(700);
+            UiSnapshot result = gateway.snapshot();
+            PageState state = PageAnalyzer.analyze(result, true);
+            if (state.page != PageState.Page.FEED
+                    || gateway.hasVisibleExactText("不感兴趣", "Not interested")) {
+                transaction.unknown("verification_failed", new JSONObject()
+                        .put("page", state.page.name()));
+                captureDiagnostic(logger, "not-interested-result-unknown");
+                throw new Blocked("not_interested_result_unknown", "不感兴趣结果不明确，未重复操作");
+            }
+            JSONObject evidence = new JSONObject().put("page", state.page.name());
+            transaction.verified(evidence);
+            transaction.committed(evidence);
+            counters.notInterested++;
+            logger.event("not_interested", new JSONObject()
+                    .put("reason", reason)
+                    .put("matched_keywords", new JSONArray(matchedKeywords))
+                    .put("verified", true));
+            return "not_interested";
+        } finally {
+            endExternalAction();
         }
-        transaction.attempted(nodeDetail(entry.node));
-        if (!gateway.tapResolvedGesture(ControlResolver.Role.NOT_INTERESTED, entry.node)) {
-            transaction.unknown("click_not_acknowledged", nodeDetail(entry.node));
-            throw new Blocked("not_interested_result_unknown", "不感兴趣结果不明确，未重复操作");
-        }
-        waitCooperative(700);
-        UiSnapshot result = gateway.snapshot();
-        PageState state = PageAnalyzer.analyze(result, true);
-        if (state.page != PageState.Page.FEED
-                || gateway.hasVisibleExactText("不感兴趣", "Not interested")) {
-            transaction.unknown("verification_failed", new JSONObject()
-                    .put("page", state.page.name()));
-            captureDiagnostic(logger, "not-interested-result-unknown");
-            throw new Blocked("not_interested_result_unknown", "不感兴趣结果不明确，未重复操作");
-        }
-        JSONObject evidence = new JSONObject().put("page", state.page.name());
-        transaction.verified(evidence);
-        transaction.committed(evidence);
-        counters.notInterested++;
-        logger.event("not_interested", new JSONObject()
-                .put("matched_keywords", new JSONArray(matchedKeywords)).put("verified", true));
-        return "not_interested";
     }
 
     private String interactFollow(AccessibilityGateway gateway, RunLogger logger,
@@ -1143,42 +1584,49 @@ public final class WarmupEngine {
             if (gateway.hasTextOrDescription("已关注", "following")) return "already_following";
             throw new Blocked("follow_button_missing", "找不到视频作者关注按钮");
         }
-        ActionLedger.Transaction transaction = beginAction(
-                logger, "follow", target, "", nodeDetail(before));
-        if (transaction == null) return "already_recorded";
-        transaction.attempted(nodeDetail(before));
-        if (!gateway.tapResolvedGesture(ControlResolver.Role.VIDEO_FOLLOW, before)) {
-            transaction.unknown("click_not_acknowledged", nodeDetail(before));
-            throw new Blocked("follow_result_unknown", "关注点击结果不明确，已停止且不会重试");
-        }
-        boolean verified = false;
-        int stableAbsence = 0;
-        for (int sample = 0; sample < 5 && !verified; sample++) {
-            waitCooperative(sample == 0 ? 600 : 300);
-            UiSnapshot observed = gateway.snapshot();
-            PageState state = PageAnalyzer.analyze(observed, true);
-            String fingerprint = VideoContent.from(observed).fingerprint();
-            ControlResolver.Match after = ControlResolver.resolve(observed, ControlResolver.Role.VIDEO_FOLLOW);
-            if (gateway.hasTextOrDescription("已关注", "following")) {
-                verified = state.page == PageState.Page.FEED && beforeFingerprint.equals(fingerprint);
-            } else if (state.page == PageState.Page.FEED && beforeFingerprint.equals(fingerprint)
-                    && after == null) {
-                stableAbsence++;
-                verified = stableAbsence >= 2;
-            } else {
-                stableAbsence = 0;
+        beginExternalAction();
+        try {
+            ActionLedger.Transaction transaction = beginAction(
+                    logger, "follow", target, "", nodeDetail(before));
+            if (transaction == null) return "already_recorded";
+            transaction.attempted(nodeDetail(before));
+            if (!gateway.tapResolvedGesture(ControlResolver.Role.VIDEO_FOLLOW, before)) {
+                transaction.unknown("click_not_acknowledged", nodeDetail(before));
+                throw new Blocked("follow_result_unknown", "关注点击结果不明确，已停止且不会重试");
             }
+            boolean verified = false;
+            int stableAbsence = 0;
+            for (int sample = 0; sample < 5 && !verified; sample++) {
+                waitCooperative(sample == 0 ? 600 : 300);
+                UiSnapshot observed = gateway.snapshot();
+                PageState state = PageAnalyzer.analyze(observed, true);
+                String fingerprint = VideoContent.from(observed).fingerprint();
+                ControlResolver.Match after = ControlResolver.resolve(
+                        observed, ControlResolver.Role.VIDEO_FOLLOW);
+                if (gateway.hasTextOrDescription("已关注", "following")) {
+                    verified = state.page == PageState.Page.FEED
+                            && beforeFingerprint.equals(fingerprint);
+                } else if (state.page == PageState.Page.FEED
+                        && beforeFingerprint.equals(fingerprint) && after == null) {
+                    stableAbsence++;
+                    verified = stableAbsence >= 2;
+                } else {
+                    stableAbsence = 0;
+                }
+            }
+            if (!verified) {
+                transaction.unknown("verification_failed", nodeDetail(before));
+                throw new Blocked("follow_result_unknown", "关注结果不明确，为避免重复操作已停止");
+            }
+            JSONObject evidence = nodeDetail(before).put("verified", true);
+            transaction.verified(evidence);
+            transaction.committed(evidence);
+            counters.follows++;
+            logger.event("follow", evidence);
+            return "followed";
+        } finally {
+            endExternalAction();
         }
-        if (!verified) {
-            transaction.unknown("verification_failed", nodeDetail(before));
-            throw new Blocked("follow_result_unknown", "关注结果不明确，为避免重复操作已停止");
-        }
-        JSONObject evidence = nodeDetail(before).put("verified", true);
-        transaction.verified(evidence);
-        transaction.committed(evidence);
-        counters.follows++;
-        logger.event("follow", evidence);
-        return "followed";
     }
 
     private String interactShare(AccessibilityGateway gateway, WarmupConfig config,
@@ -1213,120 +1661,125 @@ public final class WarmupEngine {
             throw new Blocked("repost_state_unknown", "分享面板中的转发状态无法确认");
         }
         ControlResolver.Match repost = sheet.createEntry;
-        ActionLedger.Transaction transaction = beginAction(
-                logger, "share", target, "repost",
-                nodeDetail(repost.node).put("sheet_state", sheet.state.name()));
-        if (transaction == null) {
-            if (!closeShareSheetAndVerify(
-                    gateway, config, beforeFingerprint, logger)) {
-                throw new Blocked("share_sheet_close_failed",
-                        "关闭分享面板后无法确认仍是原视频");
+        beginExternalAction();
+        try {
+            ActionLedger.Transaction transaction = beginAction(
+                    logger, "share", target, "repost",
+                    nodeDetail(repost.node).put("sheet_state", sheet.state.name()));
+            if (transaction == null) {
+                if (!closeShareSheetAndVerify(
+                        gateway, config, beforeFingerprint, logger)) {
+                    throw new Blocked("share_sheet_close_failed",
+                            "关闭分享面板后无法确认仍是原视频");
+                }
+                return "already_recorded";
             }
-            return "already_recorded";
-        }
-        transaction.attempted(nodeDetail(repost.node));
-        if (!gateway.tapResolvedGesture(ControlResolver.Role.REPOST, repost.node)) {
-            transaction.unknown("click_not_acknowledged", nodeDetail(repost.node));
-            throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
-        }
-        waitCooperative(900);
-        // First-time repost shows an education sheet ("好的") that covers the feed and breaks
-        // fingerprint checks. Dismiss it, then continue verification.
-        boolean firstTimeGuide = dismissFirstTimeRepostGuide(gateway, logger);
-        waitCooperative(firstTimeGuide ? 700 : 400);
-        UiSnapshot afterWrite = gateway.snapshot();
-        PageState afterWriteState = PageAnalyzer.analyze(afterWrite, true);
-        // Guide may still be mid-dismiss; treat first-time coachmark as non-fatal.
-        if (isFirstTimeRepostGuide(afterWrite)) {
-            dismissFirstTimeRepostGuide(gateway, logger);
-            waitCooperative(700);
-            afterWrite = gateway.snapshot();
-            afterWriteState = PageAnalyzer.analyze(afterWrite, true);
-        }
-        String afterFingerprint = VideoContent.from(afterWrite).fingerprint();
-        boolean sameVideo = !beforeFingerprint.isEmpty()
-                && beforeFingerprint.equals(afterFingerprint);
-        boolean onFeed = afterWriteState.page == PageState.Page.FEED;
-        if (!onFeed && !firstTimeGuide && !isFirstTimeRepostGuide(afterWrite)) {
-            // Share sheet may still be open after repost — not a video change.
-            if (!hasShareSheetChrome(afterWrite) && !hasRepostSuccessChrome(afterWrite)) {
-                transaction.unknown("underlying_video_changed", new JSONObject()
-                        .put("page", afterWriteState.page.name())
-                        .put("first_time_guide", firstTimeGuide));
-                throw new Blocked("share_result_unknown",
-                        "转发后底层视频发生变化，已停止且不会重试");
+            transaction.attempted(nodeDetail(repost.node));
+            if (!gateway.tapResolvedGesture(ControlResolver.Role.REPOST, repost.node)) {
+                transaction.unknown("click_not_acknowledged", nodeDetail(repost.node));
+                throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
             }
-        }
-        // Prefer reopening share sheet to confirm ALREADY_REPOSTED; if first-time guide already
-        // confirmed success copy, accept that as verification.
-        boolean verifiedByGuide = firstTimeGuide || hasRepostSuccessChrome(afterWrite);
-        ControlResolver.Match reopenMatch = ControlResolver.resolve(
-                afterWrite, ControlResolver.Role.VIDEO_SHARE);
-        UiNode reopen = reopenMatch == null ? null : reopenMatch.node;
-        if (reopen == null) {
-            // Sheet may still be open; try closing guide/sheet first then find share again.
-            gateway.pressBack();
-            waitCooperative(500);
-            afterWrite = gateway.snapshot();
-            reopenMatch = ControlResolver.resolve(afterWrite, ControlResolver.Role.VIDEO_SHARE);
-            reopen = reopenMatch == null ? null : reopenMatch.node;
-        }
-        boolean verified = verifiedByGuide;
-        RepostSheetState.Result verifiedState = null;
-        if (reopen != null && gateway.tapResolvedGesture(
-                ControlResolver.Role.VIDEO_SHARE, reopen)) {
-            waitCooperative(800);
-            // Guide can reappear when reopening sheet on first success.
-            dismissFirstTimeRepostGuide(gateway, logger);
-            waitCooperative(400);
-            verifiedState = RepostSheetState.analyze(gateway.snapshot());
-            verified = verified || verifiedState.state == RepostSheetState.State.ALREADY_REPOSTED;
-            if (!verified) captureDiagnostic(logger, "repost-verification-failed");
-        } else if (!verified) {
-            transaction.unknown("verification_entry_unavailable",
-                    reopen == null ? new JSONObject() : nodeDetail(reopen));
-            captureDiagnostic(logger, "repost-reopen-failed");
-            throw new Blocked("share_result_unknown", "转发后无法复核结果，已停止且不会重试");
-        }
-        boolean closed = closeShareSheetAndVerify(
-                gateway, config, beforeFingerprint, logger);
-        // After first-time guide, fingerprint may be weak briefly; if closed back to FEED and
-        // repost was verified by sheet or guide, do not hard-stop on same_video miss once.
-        if (!closed && verified && (verifiedByGuide || sameVideo)) {
-            waitCooperative(500);
-            closed = closeShareSheetAndVerify(gateway, config, beforeFingerprint, logger)
-                    || inspectStable(gateway, config).page == PageState.Page.FEED;
-        }
-        if (!verified) {
-            transaction.unknown("verification_failed",
-                    verifiedState == null ? new JSONObject() : repostStateDetail(verifiedState));
-            throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
-        }
-        if (!closed) {
-            transaction.unknown("verification_sheet_close_failed",
-                    verifiedState == null
-                            ? new JSONObject().put("verified_by_guide", verifiedByGuide)
-                            : repostStateDetail(verifiedState));
-            // Soft-complete: repost almost certainly landed; avoid killing the whole run.
-            logger.event("share_close_unverified", new JSONObject()
+            waitCooperative(900);
+            // First-time repost shows an education sheet ("好的") that covers the feed and breaks
+            // fingerprint checks. Dismiss it, then continue verification.
+            boolean firstTimeGuide = dismissFirstTimeRepostGuide(gateway, logger);
+            waitCooperative(firstTimeGuide ? 700 : 400);
+            UiSnapshot afterWrite = gateway.snapshot();
+            PageState afterWriteState = PageAnalyzer.analyze(afterWrite, true);
+            // Guide may still be mid-dismiss; treat first-time coachmark as non-fatal.
+            if (isFirstTimeRepostGuide(afterWrite)) {
+                dismissFirstTimeRepostGuide(gateway, logger);
+                waitCooperative(700);
+                afterWrite = gateway.snapshot();
+                afterWriteState = PageAnalyzer.analyze(afterWrite, true);
+            }
+            String afterFingerprint = VideoContent.from(afterWrite).fingerprint();
+            boolean sameVideo = !beforeFingerprint.isEmpty()
+                    && beforeFingerprint.equals(afterFingerprint);
+            boolean onFeed = afterWriteState.page == PageState.Page.FEED;
+            if (!onFeed && !firstTimeGuide && !isFirstTimeRepostGuide(afterWrite)) {
+                // Share sheet may still be open after repost — not a video change.
+                if (!hasShareSheetChrome(afterWrite) && !hasRepostSuccessChrome(afterWrite)) {
+                    transaction.unknown("underlying_video_changed", new JSONObject()
+                            .put("page", afterWriteState.page.name())
+                            .put("first_time_guide", firstTimeGuide));
+                    throw new Blocked("share_result_unknown",
+                            "转发后底层视频发生变化，已停止且不会重试");
+                }
+            }
+            // Prefer reopening share sheet to confirm ALREADY_REPOSTED; if first-time guide already
+            // confirmed success copy, accept that as verification.
+            boolean verifiedByGuide = firstTimeGuide || hasRepostSuccessChrome(afterWrite);
+            ControlResolver.Match reopenMatch = ControlResolver.resolve(
+                    afterWrite, ControlResolver.Role.VIDEO_SHARE);
+            UiNode reopen = reopenMatch == null ? null : reopenMatch.node;
+            if (reopen == null) {
+                // Sheet may still be open; try closing guide/sheet first then find share again.
+                gateway.pressBack();
+                waitCooperative(500);
+                afterWrite = gateway.snapshot();
+                reopenMatch = ControlResolver.resolve(afterWrite, ControlResolver.Role.VIDEO_SHARE);
+                reopen = reopenMatch == null ? null : reopenMatch.node;
+            }
+            boolean verified = verifiedByGuide;
+            RepostSheetState.Result verifiedState = null;
+            if (reopen != null && gateway.tapResolvedGesture(
+                    ControlResolver.Role.VIDEO_SHARE, reopen)) {
+                waitCooperative(800);
+                // Guide can reappear when reopening sheet on first success.
+                dismissFirstTimeRepostGuide(gateway, logger);
+                waitCooperative(400);
+                verifiedState = RepostSheetState.analyze(gateway.snapshot());
+                verified = verified || verifiedState.state == RepostSheetState.State.ALREADY_REPOSTED;
+                if (!verified) captureDiagnostic(logger, "repost-verification-failed");
+            } else if (!verified) {
+                transaction.unknown("verification_entry_unavailable",
+                        reopen == null ? new JSONObject() : nodeDetail(reopen));
+                captureDiagnostic(logger, "repost-reopen-failed");
+                throw new Blocked("share_result_unknown", "转发后无法复核结果，已停止且不会重试");
+            }
+            boolean closed = closeShareSheetAndVerify(
+                    gateway, config, beforeFingerprint, logger);
+            // After first-time guide, fingerprint may be weak briefly; if closed back to FEED and
+            // repost was verified by sheet or guide, do not hard-stop on same_video miss once.
+            if (!closed && verified && (verifiedByGuide || sameVideo)) {
+                waitCooperative(500);
+                closed = closeShareSheetAndVerify(gateway, config, beforeFingerprint, logger)
+                        || inspectStable(gateway, config).page == PageState.Page.FEED;
+            }
+            if (!verified) {
+                transaction.unknown("verification_failed",
+                        verifiedState == null ? new JSONObject() : repostStateDetail(verifiedState));
+                throw new Blocked("share_result_unknown", "转发结果不明确，已停止且不会重试");
+            }
+            if (!closed) {
+                transaction.unknown("verification_sheet_close_failed",
+                        verifiedState == null
+                                ? new JSONObject().put("verified_by_guide", verifiedByGuide)
+                                : repostStateDetail(verifiedState));
+                // Soft-complete: repost almost certainly landed; avoid killing the whole run.
+                logger.event("share_close_unverified", new JSONObject()
+                        .put("verified_by_guide", verifiedByGuide)
+                        .put("same_video", sameVideo));
+                gateway.pressBack();
+                waitCooperative(400);
+            }
+            JSONObject evidence = (verifiedState == null
+                    ? new JSONObject().put("state", "GUIDE_OR_SUCCESS_CHROME")
+                    : repostStateDetail(verifiedState))
+                    .put("mode", "repost")
+                    .put("verified", true)
+                    .put("first_time_guide", firstTimeGuide)
                     .put("verified_by_guide", verifiedByGuide)
-                    .put("same_video", sameVideo));
-            gateway.pressBack();
-            waitCooperative(400);
+                    .put("same_video", sameVideo);
+            transaction.verified(evidence);
+            transaction.committed(evidence);
+            counters.shares++;
+            logger.event("share", evidence);
+            return "reposted";
+        } finally {
+            endExternalAction();
         }
-        JSONObject evidence = (verifiedState == null
-                ? new JSONObject().put("state", "GUIDE_OR_SUCCESS_CHROME")
-                : repostStateDetail(verifiedState))
-                .put("mode", "repost")
-                .put("verified", true)
-                .put("first_time_guide", firstTimeGuide)
-                .put("verified_by_guide", verifiedByGuide)
-                .put("same_video", sameVideo);
-        transaction.verified(evidence);
-        transaction.committed(evidence);
-        counters.shares++;
-        logger.event("share", evidence);
-        return "reposted";
     }
 
     /** First-time "通过转发将该作品推荐给其他人" sheet with primary CTA 好的. */
@@ -1410,7 +1863,8 @@ public final class WarmupEngine {
         ActionLedger.BeginResult begin = logger.actions().begin(
                 action, target, payload, evidence);
         if (begin.allowed()) return begin.transaction;
-        if (begin.disposition == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED) {
+        if (begin.disposition == ActionLedger.BeginDisposition.DUPLICATE_COMMITTED
+                || begin.disposition == ActionLedger.BeginDisposition.DUPLICATE_NOT_APPLIED) {
             logDuplicate(logger, action, begin);
             return null;
         }
@@ -1446,46 +1900,190 @@ public final class WarmupEngine {
                              RunLogger logger, Random random, String source) throws Exception {
         ensureExpected(gateway, PageState.Page.FEED, config, logger);
         ensureVideoContext(gateway, source, logger);
-        String previous = VideoContent.from(gateway.snapshot()).fingerprint();
+        UiSnapshot beforeSnapshot = gateway.snapshot();
+        PageState beforeState = PageAnalyzer.analyze(beforeSnapshot,
+                !config.requireNetwork || gateway.networkAvailable());
+        String previous = VideoContent.from(beforeSnapshot).fingerprint();
+        boolean photo = "photo".equals(beforeState.contentKind);
+        FeedPagerContract.Result pager = FeedPagerContract.analyze(beforeSnapshot);
+        boolean semanticFirst = photo && pager.usable();
+        logger.event("page_turn_contract", new JSONObject()
+                .put("source", source)
+                .put("content_kind", beforeState.contentKind)
+                .put("semantic_first", semanticFirst)
+                .put("pager", pager.toJson()));
+
         for (int attempt = 1; attempt <= 3; attempt++) {
-            PageTurnProfile profile = PageTurnProfile.forAttempt(
-                    attempt, config.swipePace, config.swipeRandomizationEnabled, random);
-            boolean dispatched = gateway.swipeUp(
-                    profile.durationMs, profile.startX, profile.endX,
-                    profile.startY, profile.endY);
+            boolean semanticScroll = semanticFirst && attempt == 1;
+            PageTurnProfile profile = null;
+            boolean dispatched;
+            if (semanticScroll) {
+                dispatched = gateway.scrollForward(pager.pager);
+            } else {
+                int gestureAttempt = semanticFirst ? attempt - 1 : attempt;
+                profile = photo
+                        ? PageTurnProfile.forPhotoFallback(
+                        gestureAttempt, config.swipeRandomizationEnabled, random)
+                        : PageTurnProfile.forAttempt(
+                        gestureAttempt, config.swipePace,
+                        config.swipeRandomizationEnabled, random);
+                dispatched = gateway.swipeUp(
+                        profile.durationMs, profile.startX, profile.endX,
+                        profile.startY, profile.endY);
+            }
+            JSONObject attemptDetail = pageTurnAttemptDetail(
+                    attempt, semanticScroll, profile, dispatched, photo);
             if (!dispatched) {
-                logger.event("page_turn_attempt", new JSONObject()
-                        .put("attempt", attempt).put("profile", profile.name)
-                        .put("duration_ms", profile.durationMs)
-                        .put("start_x", profile.startX).put("end_x", profile.endX)
-                        .put("start_y", profile.startY).put("end_y", profile.endY)
-                        .put("randomized", profile.randomized)
-                        .put("dispatched", false));
+                logger.event("page_turn_attempt", attemptDetail);
                 continue;
             }
-            waitCooperative(sample(random, 900, 1600));
-            ensureExpected(gateway, PageState.Page.FEED, config, logger);
-            ensureVideoContext(gateway, source, logger);
-            String next = VideoContent.from(gateway.snapshot()).fingerprint();
-            boolean changed = !next.isEmpty() && !next.equals(previous);
-            logger.event("page_turn_attempt", new JSONObject()
-                    .put("attempt", attempt).put("profile", profile.name)
-                    .put("duration_ms", profile.durationMs)
-                    .put("start_x", profile.startX).put("end_x", profile.endX)
-                    .put("start_y", profile.startY).put("end_y", profile.endY)
-                    .put("randomized", profile.randomized)
-                    .put("dispatched", true).put("identity_changed", changed));
-            if (changed) {
-                logger.event("next_video", new JSONObject()
-                        .put("attempt", attempt).put("profile", profile.name)
-                        .put("duration_ms", profile.durationMs)
-                        .put("start_x", profile.startX).put("end_x", profile.endX)
-                        .put("start_y", profile.startY).put("end_y", profile.endY)
-                        .put("randomized", profile.randomized));
+            PageTurnVerification verification = observePageTurn(
+                    gateway, config, logger, source, previous);
+            attemptDetail.put("identity_changed", verification.identityChanged)
+                    .put("identity_stable", verification.identityStable)
+                    .put("stable_samples", verification.stableSamples)
+                    .put("observed_page", verification.page.name())
+                    .put("observed_context", verification.context.name());
+            logger.event("page_turn_attempt", attemptDetail);
+            if (verification.verified()) {
+                logger.event("next_video", new JSONObject(attemptDetail.toString())
+                        .put("verification", "stable_identity_and_source_contract"));
                 return;
+            }
+            if (verification.identityChanged) {
+                throw new Blocked("next_video_identity_unstable",
+                        "已观察到内容变化，但新视频身份未稳定；为避免连续跳过已停止");
             }
         }
         throw new Blocked("next_video_unverified", "连续三次未能确认已切换视频");
+    }
+
+    private PageTurnVerification observePageTurn(AccessibilityGateway gateway,
+                                                 WarmupConfig config,
+                                                 RunLogger logger,
+                                                 String source,
+                                                 String previousFingerprint) throws Exception {
+        VideoSurfaceContext.Kind expectedContext = "search".equals(source)
+                ? VideoSurfaceContext.Kind.SEARCH_DETAIL
+                : VideoSurfaceContext.Kind.RECOMMENDATION_HOME;
+        String candidate = "";
+        int stableSamples = 0;
+        boolean identityChangeSeen = false;
+        PageState lastPage = new PageState(PageState.Page.UNKNOWN, "none",
+                new ArrayList<>(), new ArrayList<>(), 0d, new ArrayList<>());
+        VideoSurfaceContext.Result lastContext =
+                VideoSurfaceContext.analyze(gateway.snapshot());
+        long deadline = now() + 3_600L;
+        boolean firstSample = true;
+        while (now() < deadline) {
+            waitCooperative(firstSample ? 520 : 240);
+            firstSample = false;
+            UiSnapshot observed = gateway.snapshot();
+            lastPage = PageAnalyzer.analyze(observed,
+                    !config.requireNetwork || gateway.networkAvailable());
+            if (!lastPage.blockers.isEmpty()) {
+                throw new Blocked(lastPage.blockers.get(0),
+                        "翻页后出现页面阻断：" + lastPage.blockers);
+            }
+            lastContext = VideoSurfaceContext.analyze(observed);
+            String fingerprint = VideoContent.from(observed).fingerprint();
+            boolean changed = lastPage.page == PageState.Page.FEED
+                    && lastContext.kind == expectedContext
+                    && !fingerprint.isEmpty()
+                    && !fingerprint.equals(previousFingerprint);
+            if (changed) {
+                identityChangeSeen = true;
+                if (fingerprint.equals(candidate)) {
+                    stableSamples++;
+                } else {
+                    candidate = fingerprint;
+                    stableSamples = 1;
+                }
+                if (stableSamples >= 2) {
+                    ensureExpected(gateway, PageState.Page.FEED, config, logger);
+                    ensureVideoContext(gateway, source, logger);
+                    String finalFingerprint = VideoContent.from(gateway.snapshot()).fingerprint();
+                    boolean stable = candidate.equals(finalFingerprint);
+                    if (stable) {
+                        return new PageTurnVerification(true, true,
+                                stableSamples + 1, lastPage.page, lastContext.kind);
+                    }
+                    candidate = !finalFingerprint.isEmpty()
+                            && !finalFingerprint.equals(previousFingerprint)
+                            ? finalFingerprint : "";
+                    stableSamples = candidate.isEmpty() ? 0 : 1;
+                }
+            } else {
+                candidate = "";
+                stableSamples = 0;
+            }
+        }
+
+        // Confirm that the failed attempt left us on a safe source surface before trying a
+        // different bounded strategy. This never treats a photo-slide change as a post change.
+        ensureExpected(gateway, PageState.Page.FEED, config, logger);
+        ensureVideoContext(gateway, source, logger);
+        UiSnapshot finalFirst = gateway.snapshot();
+        String finalFirstFingerprint = VideoContent.from(finalFirst).fingerprint();
+        waitCooperative(320);
+        UiSnapshot finalSecond = gateway.snapshot();
+        String finalSecondFingerprint = VideoContent.from(finalSecond).fingerprint();
+        PageState finalPage = PageAnalyzer.analyze(finalSecond,
+                !config.requireNetwork || gateway.networkAvailable());
+        VideoSurfaceContext.Result finalContext = VideoSurfaceContext.analyze(finalSecond);
+        boolean finalChanged = (!finalFirstFingerprint.isEmpty()
+                && !finalFirstFingerprint.equals(previousFingerprint))
+                || (!finalSecondFingerprint.isEmpty()
+                && !finalSecondFingerprint.equals(previousFingerprint));
+        boolean finalStable = finalPage.page == PageState.Page.FEED
+                && finalContext.kind == expectedContext
+                && !finalFirstFingerprint.isEmpty()
+                && finalFirstFingerprint.equals(finalSecondFingerprint)
+                && !finalFirstFingerprint.equals(previousFingerprint);
+        return new PageTurnVerification(identityChangeSeen || finalChanged, finalStable,
+                finalStable ? 2 : 0, finalPage.page, finalContext.kind);
+    }
+
+    private static JSONObject pageTurnAttemptDetail(int attempt, boolean semanticScroll,
+                                                    PageTurnProfile profile,
+                                                    boolean dispatched, boolean photo)
+            throws Exception {
+        JSONObject detail = new JSONObject()
+                .put("attempt", attempt)
+                .put("dispatch", semanticScroll ? "semantic_scroll_forward" : "gesture")
+                .put("content_kind", photo ? "photo" : "other")
+                .put("dispatched", dispatched);
+        if (profile == null) {
+            return detail.put("profile", "outer_feed_pager");
+        }
+        return detail.put("profile", profile.name)
+                .put("duration_ms", profile.durationMs)
+                .put("start_x", profile.startX).put("end_x", profile.endX)
+                .put("start_y", profile.startY).put("end_y", profile.endY)
+                .put("randomized", profile.randomized);
+    }
+
+    private static final class PageTurnVerification {
+        final boolean identityChanged;
+        final boolean identityStable;
+        final int stableSamples;
+        final PageState.Page page;
+        final VideoSurfaceContext.Kind context;
+
+        PageTurnVerification(boolean identityChanged, boolean identityStable, int stableSamples,
+                             PageState.Page page, VideoSurfaceContext.Kind context) {
+            this.identityChanged = identityChanged;
+            this.identityStable = identityStable;
+            this.stableSamples = stableSamples;
+            this.page = page;
+            this.context = context;
+        }
+
+        boolean verified() {
+            return identityChanged && identityStable && stableSamples >= 2
+                    && page == PageState.Page.FEED
+                    && context != VideoSurfaceContext.Kind.UNKNOWN;
+        }
     }
 
     private void returnToRecommendationHome(AccessibilityGateway gateway, WarmupConfig config,
@@ -1808,13 +2406,14 @@ public final class WarmupEngine {
     private static boolean isSoftCommentFailure(Blocked error) {
         if (error == null || error.code == null) return false;
         switch (error.code) {
+            case "comment_result_unknown":
+                return false;
             case "comment_entry_missing":
             case "comment_composer_not_ready":
             case "comment_input_failed":
             case "comment_keyboard_dismiss_failed":
             case "comment_send_missing":
             case "comment_draft_not_stable":
-            case "comment_result_unknown":
             case "unexpected_transition":
             case "page_unstable":
                 return true;
@@ -2033,7 +2632,7 @@ public final class WarmupEngine {
                                 + " · " + describePageMismatch(from, observed));
             }
             if (observed.page != PageState.Page.UNKNOWN) {
-                if (PageTransitionPolicy.allows(from, observed.page, action)) {
+                if (PageTransitionPolicy.allows(from, observed, action)) {
                     logger.event("transition_verified", new JSONObject()
                             .put("from", from.name()).put("to", observed.page.name())
                             .put("action", action.name()).put("confidence", observed.confidence)
@@ -2068,7 +2667,7 @@ public final class WarmupEngine {
     private void requireTransition(PageState.Page from, PageState observed,
                                    PageTransitionPolicy.Action action,
                                    RunLogger logger) throws Exception {
-        if (PageTransitionPolicy.allows(from, observed.page, action)) {
+        if (PageTransitionPolicy.allows(from, observed, action)) {
             logger.event("transition_verified", new JSONObject()
                     .put("from", from.name()).put("to", observed.page.name())
                     .put("action", action.name()).put("confidence", observed.confidence)
@@ -2115,6 +2714,23 @@ public final class WarmupEngine {
     }
 
     private void publish(RunSnapshot.Status status, String phase, String step, String message) {
+        // A worker update can race with a UI command. Never let a late RUNNING update erase the
+        // acknowledgement that the user has already seen.
+        if (status == RunSnapshot.Status.RUNNING) {
+            synchronized (control) {
+                if (stopRequested) {
+                    status = RunSnapshot.Status.STOPPING;
+                    step = "正在停止";
+                    message = externalActionInFlight
+                            ? "正在核验已发起的操作，核验后立即停止"
+                            : "停止命令已收到";
+                } else if (pauseRequested) {
+                    status = RunSnapshot.Status.PAUSING;
+                    step = "正在暂停";
+                    message = "控制命令已收到，正在到达可暂停位置";
+                }
+            }
+        }
         RunBudget activeBudget = budget;
         long elapsed = activeBudget == null ? 0 : activeBudget.elapsedMs(now());
         int videos = activeBudget == null ? current.videosSeen : activeBudget.videosSeen();
@@ -2126,8 +2742,21 @@ public final class WarmupEngine {
     }
 
     private void waitCooperative(long milliseconds) throws UserStopped {
+        waitCooperative(milliseconds, false);
+    }
+
+    /**
+     * Long, read-only viewing waits may pause in place. Transition and write-verification waits
+     * remain atomic and defer pause until the next stable checkpoint.
+     */
+    private void waitPauseable(long milliseconds) throws UserStopped {
+        waitCooperative(milliseconds, true);
+    }
+
+    private void waitCooperative(long milliseconds, boolean pauseSafe) throws UserStopped {
         long remaining = Math.max(0, milliseconds);
         while (remaining > 0) {
+            if (pauseSafe) promotePause("已暂停", "视频保持在当前位置");
             checkControl();
             long slice = Math.min(200, remaining);
             SystemClock.sleep(slice);
@@ -2142,7 +2771,7 @@ public final class WarmupEngine {
             while (paused && !stopRequested) {
                 try { control.wait(500); } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new UserStopped(); }
             }
-            if (stopRequested) throw new UserStopped();
+            if (stopRequested && !externalActionInFlight) throw new UserStopped();
         }
         // After a long pause, Accessibility often needs a beat before windows reappear.
         if (wasPaused) {
@@ -2156,6 +2785,11 @@ public final class WarmupEngine {
      * comments/search transition or an external write verification.
      */
     private void safeCheckpoint() throws UserStopped {
+        promotePause("已安全暂停", "当前视频已完整落盘");
+        checkControl();
+    }
+
+    private void promotePause(String step, String message) {
         boolean newlyPaused = false;
         synchronized (control) {
             if (pauseRequested && !paused && !stopRequested) {
@@ -2166,10 +2800,22 @@ public final class WarmupEngine {
             }
         }
         if (newlyPaused) {
-            publish(RunSnapshot.Status.PAUSED, current.phase,
-                    "已安全暂停", "当前视频已完整落盘");
+            publish(RunSnapshot.Status.PAUSED, current.phase, step, message);
         }
-        checkControl();
+    }
+
+    private void beginExternalAction() throws UserStopped {
+        synchronized (control) {
+            if (stopRequested) throw new UserStopped();
+            externalActionInFlight = true;
+        }
+    }
+
+    private void endExternalAction() {
+        synchronized (control) {
+            externalActionInFlight = false;
+            control.notifyAll();
+        }
     }
 
     private static void collectComments(UiSnapshot snapshot, Set<String> output) {
@@ -2205,6 +2851,17 @@ public final class WarmupEngine {
     private static boolean isLikeSelected(UiNode node) {
         String description = node.description.toLowerCase(Locale.ROOT);
         return node.description.startsWith("点赞的视频") || description.startsWith("liked video");
+    }
+
+    private static String suppressAction(RunLogger logger, Counters counters,
+                                         String action) throws Exception {
+        ActionCircuitBreaker.Snapshot circuit = counters.actionCircuit.snapshot(action);
+        logger.event(action + "_suppressed", new JSONObject()
+                .put("reason", "consecutive_not_applied")
+                .put("consecutive_not_applied", circuit.consecutiveNotApplied)
+                .put("scope", "current_run")
+                .put("run_continues", true));
+        return "suppressed_not_applied";
     }
 
     private static boolean plan(Random random, double rate, int used, int maximum) {
@@ -2272,6 +2929,7 @@ public final class WarmupEngine {
     }
 
     private static final class Counters {
+        final ActionCircuitBreaker actionCircuit = new ActionCircuitBreaker(2);
         int likes;
         int favorites;
         int comments;

@@ -20,8 +20,12 @@ public final class ConfigStore {
             JSONObject json = new JSONObject(raw);
             WarmupConfig config = WarmupConfig.fromJson(json);
             JSONObject legacyInterest = json.optJSONObject("interest");
-            if (json.optJSONObject("not_interested") == null && legacyInterest != null
-                    && legacyInterest.optBoolean("apply_not_interested", false)) {
+            boolean legacyInterestMigrated = json.optJSONObject("not_interested") == null
+                    && legacyInterest != null
+                    && legacyInterest.optBoolean("apply_not_interested", false);
+            boolean schemaMigrated = json.optInt("schema_version", 1)
+                    < WarmupConfig.SCHEMA_VERSION;
+            if (legacyInterestMigrated || schemaMigrated) {
                 preferences.edit().putString(KEY, config.toJson().toString()).apply();
             }
             return config;

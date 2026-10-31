@@ -1,10 +1,7 @@
 package com.xwell.rpatt;
 
 import android.Manifest;
-import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
-import android.content.ComponentName;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -17,7 +14,6 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
-import android.view.accessibility.AccessibilityManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -25,10 +21,10 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.xwell.rpatt.automation.AccessibilityServiceStatus;
 import com.xwell.rpatt.automation.PageAnalyzer;
 import com.xwell.rpatt.automation.ResolverReplayAudit;
 import com.xwell.rpatt.automation.TikTokPermissionProbe;
-import com.xwell.rpatt.automation.WarmupAccessibilityService;
 import com.xwell.rpatt.config.ConfigStore;
 import com.xwell.rpatt.config.WarmupConfig;
 import com.xwell.rpatt.service.WarmupForegroundService;
@@ -100,7 +96,8 @@ public final class MainActivity extends Activity {
         boolean safeControlReady = getIntent().getBooleanExtra(
                 EXTRA_SAFE_CONTROL_READY, false);
         getIntent().removeExtra(EXTRA_SAFE_CONTROL_READY);
-        if (session.status == RunSnapshot.Status.RUNNING
+        if ((session.status == RunSnapshot.Status.RUNNING
+                || session.status == RunSnapshot.Status.PAUSING)
                 && !safeControlReady) {
             Intent handoff = new Intent(this, WarmupForegroundService.class)
                     .setAction(WarmupForegroundService.ACTION_OPEN_CONTROL);
@@ -280,7 +277,7 @@ public final class MainActivity extends Activity {
                 + (config.commentEnabled ? 1 : 0) + (config.followEnabled ? 1 : 0)
                 + (config.shareEnabled ? 1 : 0) + (config.openComments ? 1 : 0)
                 + (config.searchEnabled ? 1 : 0) + (config.interestEnabled ? 1 : 0)
-                + (config.notInterestedEnabled ? 1 : 0);
+                + (config.hasNotInterestedTrigger() ? 1 : 0);
         interactionDetail.setText(String.format(Locale.CHINA, "已启用 %d 项 · 点赞 %s · 收藏 %s",
                 enabled,
                 config.likeEnabled ? percent(config.likeRate) + "%" : "关闭",
@@ -314,9 +311,25 @@ public final class MainActivity extends Activity {
                     .setPositiveButton("去调整", (dialog, which) -> openSettings()).show();
             return false;
         }
-        if (!accessibilityEnabled()) {
-            toast("请先开启 TK养号助手无障碍服务");
-            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        AccessibilityServiceStatus.State accessibility =
+                AccessibilityServiceStatus.query(this);
+        if (!AccessibilityServiceStatus.isReady(accessibility)) {
+            String message;
+            if (accessibility == AccessibilityServiceStatus.State.NOT_REGISTERED) {
+                message = "系统没有发现服务组件，请重新安装当前版本后再检查。";
+            } else if (accessibility
+                    == AccessibilityServiceStatus.State.AUTHORIZED_NOT_CONNECTED) {
+                message = "系统已保留授权，但服务尚未连接。请在无障碍列表关闭后重新开启一次。";
+            } else {
+                message = "系统当前没有授权。请在列表中找到“TK养号助手 · 页面操作辅助”并开启。";
+            }
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("无障碍尚未就绪")
+                    .setMessage(message)
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("去系统设置", (dialog, which) ->
+                            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                    .show();
             return false;
         }
         if (!tiktokInstalled()) {
@@ -338,10 +351,12 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshStatus() {
-        boolean accessibility = accessibilityEnabled();
+        AccessibilityServiceStatus.State accessibility =
+                AccessibilityServiceStatus.query(this);
         boolean overlay = Settings.canDrawOverlays(this);
         boolean tiktok = tiktokInstalled();
-        accessibilityCell.render(accessibility, accessibility ? "已就绪" : "需开启");
+        accessibilityCell.render(AccessibilityServiceStatus.isReady(accessibility),
+                AccessibilityServiceStatus.shortLabel(accessibility));
         overlayCell.render(overlay, overlay ? "已允许" : "需授权");
         tiktokCell.render(tiktok, tiktok ? "已连接" : "未安装");
     }
@@ -361,9 +376,14 @@ public final class MainActivity extends Activity {
             historyIcon.setColorFilter(RpaPalette.AMBER);
             RunSnapshot active = WarmupSessionController.currentSession();
             if (WarmupSessionController.hasActiveSession()) {
+                String activeLabel = active.status == RunSnapshot.Status.PAUSED ? "已暂停"
+                        : (active.status == RunSnapshot.Status.PAUSING ? "暂停中"
+                        : (active.status == RunSnapshot.Status.STOPPING ? "停止中"
+                        : (active.status == RunSnapshot.Status.BLOCKED
+                        ? "已中断，可继续" : "正在运行")));
                 history.setText(String.format(Locale.CHINA, "%s · %s\n%d/%d 条 · %s",
                         profileName(currentConfig.profile),
-                        active.status == RunSnapshot.Status.PAUSED ? "已安全暂停" : "正在运行",
+                        activeLabel,
                         active.videosSeen, active.videoLimit, active.step));
             } else {
                 history.setText(String.format(Locale.CHINA, "%s · 未正常收尾",
@@ -408,16 +428,6 @@ public final class MainActivity extends Activity {
                         .show();
             }
         } catch (Exception ignored) {}
-    }
-
-    private boolean accessibilityEnabled() {
-        AccessibilityManager manager = (AccessibilityManager) getSystemService(Context.ACCESSIBILITY_SERVICE);
-        ComponentName expected = new ComponentName(this, WarmupAccessibilityService.class);
-        for (AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
-            ComponentName enabled = ComponentName.unflattenFromString(info.getId());
-            if (expected.equals(enabled)) return true;
-        }
-        return false;
     }
 
     private boolean tiktokInstalled() {

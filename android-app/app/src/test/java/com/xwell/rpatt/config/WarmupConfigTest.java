@@ -22,6 +22,7 @@ public final class WarmupConfigTest {
         assertTrue(config.swipeRandomizationEnabled);
         assertTrue(config.commentScrollRandom);
         assertTrue(config.skipLive);
+        assertFalse(config.unmatchedAsNotInterested);
         config.validate();
         assertTrue(config.toJson().optJSONObject("browse").optBoolean("skip_live", false));
     }
@@ -33,6 +34,49 @@ public final class WarmupConfigTest {
         assertFalse(restored.skipLive);
         restored.skipLive = true;
         assertTrue(WarmupConfig.fromJson(restored.toJson()).skipLive);
+    }
+
+    @Test public void schemaFourEnabledCommentWithCompleteContractMigratesToNonZeroRate()
+            throws Exception {
+        JSONObject legacy = WarmupConfig.defaultsFor("custom").toJson()
+                .put("schema_version", 4);
+        legacy.getJSONObject("interactions")
+                .put("comment_enabled", true)
+                .put("comment_rate", 0.0)
+                .put("max_comments", 1)
+                .put("comment_texts", new org.json.JSONArray().put("test comment"));
+
+        WarmupConfig migrated = WarmupConfig.fromJson(legacy);
+
+        assertTrue(migrated.commentEnabled);
+        assertEquals(WarmupConfig.DEFAULT_ENABLED_COMMENT_RATE,
+                migrated.commentRate, 0.0);
+    }
+
+    @Test public void schemaFourIncompleteCommentContractMigratesToDisabled() throws Exception {
+        JSONObject legacy = WarmupConfig.defaultsFor("custom").toJson()
+                .put("schema_version", 4);
+        legacy.getJSONObject("interactions")
+                .put("comment_enabled", true)
+                .put("comment_rate", 0.0)
+                .put("comment_texts", new org.json.JSONArray());
+
+        WarmupConfig migrated = WarmupConfig.fromJson(legacy);
+
+        assertFalse(migrated.commentEnabled);
+        assertEquals(0.0, migrated.commentRate, 0.0);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void currentSchemaRejectsEnabledCommentWithZeroRate() throws Exception {
+        JSONObject invalid = WarmupConfig.defaultsFor("custom").toJson();
+        invalid.getJSONObject("interactions")
+                .put("comment_enabled", true)
+                .put("comment_rate", 0.0)
+                .put("max_comments", 1)
+                .put("comment_texts", new org.json.JSONArray().put("test comment"));
+
+        WarmupConfig.fromJson(invalid);
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -78,6 +122,30 @@ public final class WarmupConfigTest {
         assertEquals("learn", config.notInterestedKeywords.get(0));
     }
 
+    @Test public void unmatchedInterestFeedbackRoundTripsAndActivatesSharedStep() {
+        WarmupConfig config = WarmupConfig.defaultsFor("custom");
+        config.interestEnabled = true;
+        config.interestKeywords = Arrays.asList("AI");
+        config.unmatchedAsNotInterested = true;
+        config.notInterestedEnabled = false;
+
+        WarmupConfig restored = WarmupConfig.fromJson(config.toJson());
+
+        assertTrue(restored.unmatchedAsNotInterested);
+        assertTrue(restored.unmatchedInterestFeedbackEnabled());
+        assertTrue(restored.hasNotInterestedTrigger());
+        assertFalse(restored.notInterestedEnabled);
+    }
+
+    @Test public void unmatchedInterestFeedbackIsDormantWhenInterestModuleIsOff() {
+        WarmupConfig config = WarmupConfig.defaultsFor("custom");
+        config.unmatchedAsNotInterested = true;
+
+        assertFalse(config.unmatchedInterestFeedbackEnabled());
+        assertFalse(config.hasNotInterestedTrigger());
+        config.validate();
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void swipePaceUsesKnownValues() {
         WarmupConfig config = WarmupConfig.defaultsFor("cold");
@@ -89,9 +157,79 @@ public final class WarmupConfigTest {
         WarmupConfig cold = WarmupConfig.defaultsFor("cold");
         WarmupConfig normal = WarmupConfig.defaultsFor("normal");
         assertEquals(WarmupConfig.STEP_COMMENTS, cold.workflowOrder.get(0));
-        assertEquals(WarmupConfig.STEP_LIKE, normal.workflowOrder.get(0));
+        assertEquals(WarmupConfig.STEP_COMMENTS, normal.workflowOrder.get(0));
         cold.validate();
         normal.validate();
+    }
+
+    @Test public void builtInProfilesChangeBehaviorBeyondSessionBudget() {
+        WarmupConfig cold = WarmupConfig.defaultsFor("cold");
+        WarmupConfig normal = WarmupConfig.defaultsFor("normal");
+        WarmupConfig active = WarmupConfig.defaultsFor("active");
+
+        assertEquals(WarmupConfig.JOURNEY_ORDERED, cold.journeyMode);
+        assertEquals(WarmupConfig.JOURNEY_RECOMMENDATION_LED, normal.journeyMode);
+        assertEquals("slow", cold.swipePace);
+        assertEquals("natural", normal.swipePace);
+        assertTrue(cold.commentReadRate < normal.commentReadRate);
+        assertTrue(normal.commentReadRate < active.commentReadRate);
+        assertFalse(cold.followEnabled);
+        assertTrue(normal.followEnabled);
+        assertFalse(normal.shareEnabled);
+        assertTrue(active.shareEnabled);
+        assertTrue(cold.likeRate < normal.likeRate);
+        assertTrue(normal.likeRate < active.likeRate);
+        cold.validate();
+        normal.validate();
+        active.validate();
+    }
+
+    @Test public void presetKeepsAuthoredContentAndEnablesOnlyCompleteModules() {
+        WarmupConfig authored = WarmupConfig.defaultsFor("custom");
+        authored.searchKeywords = Arrays.asList("GPT");
+        authored.interestKeywords = Arrays.asList("AI");
+        authored.unmatchedAsNotInterested = true;
+        authored.notInterestedKeywords = Arrays.asList("spam");
+        authored.commentTexts = Arrays.asList("Interesting");
+
+        WarmupConfig active = WarmupConfig.presetFor("active", authored);
+
+        assertEquals("GPT", active.searchKeywords.get(0));
+        assertEquals("AI", active.interestKeywords.get(0));
+        assertEquals("spam", active.notInterestedKeywords.get(0));
+        assertEquals("Interesting", active.commentTexts.get(0));
+        assertTrue(active.searchEnabled);
+        assertTrue(active.interestEnabled);
+        assertTrue(active.unmatchedAsNotInterested);
+        assertTrue(active.notInterestedEnabled);
+        assertTrue(active.commentEnabled);
+        active.validate();
+    }
+
+    @Test public void presetWithoutAuthoredContentNeverCreatesInvalidSwitches() {
+        WarmupConfig active = WarmupConfig.presetFor(
+                "active", WarmupConfig.defaultsFor("custom"));
+
+        assertFalse(active.searchEnabled);
+        assertFalse(active.interestEnabled);
+        assertFalse(active.notInterestedEnabled);
+        assertFalse(active.commentEnabled);
+        active.validate();
+    }
+
+    @Test public void lightPresetKeepsTextButDoesNotStartSearchOrPublishing() {
+        WarmupConfig authored = WarmupConfig.defaultsFor("custom");
+        authored.searchKeywords = Arrays.asList("GPT");
+        authored.interestKeywords = Arrays.asList("AI");
+        authored.commentTexts = Arrays.asList("Interesting");
+
+        WarmupConfig cold = WarmupConfig.presetFor("cold", authored);
+
+        assertEquals("GPT", cold.searchKeywords.get(0));
+        assertTrue(cold.interestEnabled);
+        assertFalse(cold.searchEnabled);
+        assertFalse(cold.commentEnabled);
+        cold.validate();
     }
 
     @Test(expected = IllegalArgumentException.class)

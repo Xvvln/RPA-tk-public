@@ -1,10 +1,7 @@
 package com.xwell.rpatt;
 
 import android.Manifest;
-import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
-import android.content.ComponentName;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -17,7 +14,6 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
-import android.view.accessibility.AccessibilityManager;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -27,8 +23,8 @@ import android.widget.Toast;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.materialswitch.MaterialSwitch;
+import com.xwell.rpatt.automation.AccessibilityServiceStatus;
 import com.xwell.rpatt.automation.PageAnalyzer;
-import com.xwell.rpatt.automation.WarmupAccessibilityService;
 import com.xwell.rpatt.config.ConfigStore;
 import com.xwell.rpatt.config.WarmupConfig;
 import com.xwell.rpatt.service.WarmupForegroundService;
@@ -39,6 +35,7 @@ public final class ApplicationSettingsActivity extends Activity {
     private MaterialSwitch lightMode;
     private MaterialSwitch startCollapsed;
     private MaterialSwitch vibrateOnBlock;
+    private LinearLayout permissionRows;
     private WarmupConfig config;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -56,6 +53,7 @@ public final class ApplicationSettingsActivity extends Activity {
             startCollapsed.setChecked(config.startCollapsed);
             vibrateOnBlock.setChecked(config.vibrateOnBlock);
         }
+        if (permissionRows != null) refreshPermissionRows();
     }
 
     private View buildUi() {
@@ -98,19 +96,10 @@ public final class ApplicationSettingsActivity extends Activity {
         root.addView(materialCard(appearance));
 
         root.addView(section("系统权限"));
-        LinearLayout permissions = column();
-        permissions.setPadding(dp(14), dp(6), dp(14), dp(6));
-        permissions.addView(permissionRow("无障碍服务", accessibilityEnabled() ? "已开启" : "需开启",
-                accessibilityEnabled(), () -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-        permissions.addView(divider());
-        permissions.addView(permissionRow("悬浮窗权限", Settings.canDrawOverlays(this) ? "已允许" : "需授权",
-                Settings.canDrawOverlays(this), () -> startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + getPackageName())))));
-        permissions.addView(divider());
-        boolean notified = Build.VERSION.SDK_INT < 33
-                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
-        permissions.addView(permissionRow("通知权限", notified ? "已允许" : "需授权", notified, this::requestNotifications));
-        root.addView(materialCard(permissions));
+        permissionRows = column();
+        permissionRows.setPadding(dp(14), dp(6), dp(14), dp(10));
+        refreshPermissionRows();
+        root.addView(materialCard(permissionRows));
 
         root.addView(section("悬浮控制"));
         LinearLayout overlay = column();
@@ -130,6 +119,37 @@ public final class ApplicationSettingsActivity extends Activity {
         root.addView(primaryButton("保存设置", this::saveAndFinish), new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
         return scroll;
+    }
+
+    private void refreshPermissionRows() {
+        permissionRows.removeAllViews();
+        AccessibilityServiceStatus.State accessibility =
+                AccessibilityServiceStatus.query(this);
+        permissionRows.addView(permissionRow(
+                "无障碍服务",
+                AccessibilityServiceStatus.shortLabel(accessibility),
+                AccessibilityServiceStatus.isReady(accessibility),
+                () -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
+        TextView accessibilityNote = text(
+                "系统列表名称：TK养号助手 · 页面操作辅助。授权由系统保存；若系统清空，普通 App 不能静默恢复。",
+                11, RpaPalette.TEXT_MUTED);
+        accessibilityNote.setPadding(dp(34), 0, dp(4), dp(8));
+        permissionRows.addView(accessibilityNote);
+        permissionRows.addView(divider());
+
+        boolean overlay = Settings.canDrawOverlays(this);
+        permissionRows.addView(permissionRow(
+                "悬浮窗权限", overlay ? "已允许" : "需授权", overlay,
+                () -> startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName())))));
+        permissionRows.addView(divider());
+
+        boolean notified = Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED;
+        permissionRows.addView(permissionRow(
+                "通知权限", notified ? "已允许" : "需授权", notified,
+                this::requestNotifications));
     }
 
     private View permissionRow(String label, String status, boolean ready, Runnable action) {
@@ -178,8 +198,12 @@ public final class ApplicationSettingsActivity extends Activity {
         config.startCollapsed = startCollapsed.isChecked();
         config.vibrateOnBlock = vibrateOnBlock.isChecked();
         ConfigStore.save(this, config);
-        if (!accessibilityEnabled()) {
-            toast("请先开启无障碍服务");
+        AccessibilityServiceStatus.State accessibility =
+                AccessibilityServiceStatus.query(this);
+        if (!AccessibilityServiceStatus.isReady(accessibility)) {
+            toast(accessibility == AccessibilityServiceStatus.State.NOT_AUTHORIZED
+                    ? "请开启“TK养号助手 · 页面操作辅助”"
+                    : "无障碍服务尚未连接，请关闭后重新开启");
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
@@ -197,17 +221,6 @@ public final class ApplicationSettingsActivity extends Activity {
                 .setAction(WarmupForegroundService.ACTION_SHOW);
         startForegroundService(intent);
         toast("悬浮窗已显示");
-    }
-
-    private boolean accessibilityEnabled() {
-        AccessibilityManager manager = (AccessibilityManager) getSystemService(Context.ACCESSIBILITY_SERVICE);
-        ComponentName expected = new ComponentName(this, WarmupAccessibilityService.class);
-        for (AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(
-                AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
-            ComponentName enabled = ComponentName.unflattenFromString(info.getId());
-            if (expected.equals(enabled)) return true;
-        }
-        return false;
     }
 
     private void requestNotifications() {

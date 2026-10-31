@@ -51,7 +51,7 @@
         <service
             android:name=".automation.WarmupAccessibilityService"
             android:exported="false"
-            android:label="TK养号助手自动化"
+            android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

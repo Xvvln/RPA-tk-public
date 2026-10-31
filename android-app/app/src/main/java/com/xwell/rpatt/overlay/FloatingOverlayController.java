@@ -50,6 +50,7 @@ public final class FloatingOverlayController {
     private MaterialButton primary;
     private TextView primaryLabel;
     private MaterialButton stop;
+    private TextView stopLabel;
     private SwipePageHost pageHost;
     private LinearLayout runDots;
     private LinearLayout actionDots;
@@ -114,8 +115,8 @@ public final class FloatingOverlayController {
     public void render(OverlayState state) {
         main.post(() -> {
             if (root == null) return;
-            boolean newlyBlocked = state.status == OverlayState.Status.BLOCKED
-                    && (lastState == null || lastState.status != OverlayState.Status.BLOCKED);
+            boolean newlyBlocked = requiresAttention(state)
+                    && (lastState == null || !requiresAttention(lastState));
             lastState = state;
 
             int configuredLimit = state.videoLimit > 0
@@ -123,13 +124,15 @@ public final class FloatingOverlayController {
                     : ConfigStore.load(context).videoCount;
             int limit = Math.max(1, configuredLimit);
             float progress = Math.min(1f, state.videosSeen / (float) limit);
+            boolean commandPending = state.pausing() || state.stopping();
             progressRing.setIndicatorColor(
-                    state.status == OverlayState.Status.BLOCKED ? RpaPalette.RED : RpaPalette.PINK);
+                    requiresAttention(state) ? RpaPalette.RED
+                            : (commandPending ? RpaPalette.AMBER : RpaPalette.PINK));
             progressRing.setProgressCompat(Math.round(progress * 1000), true);
             progressText.setText(String.format(Locale.CHINA, "%d/%d", state.videosSeen, configuredLimit));
             phase.setText(shortPhase(state));
 
-            boolean blocked = state.status == OverlayState.Status.BLOCKED;
+            boolean blocked = requiresAttention(state);
             progressRing.setVisibility(blocked ? View.GONE : View.VISIBLE);
             progressText.setVisibility(blocked ? View.GONE : View.VISIBLE);
             blockedMark.setVisibility(blocked ? View.VISIBLE : View.GONE);
@@ -139,17 +142,22 @@ public final class FloatingOverlayController {
             panel.setStrokeColor(blocked ? RpaPalette.RED : RpaPalette.BORDER);
             panel.setStrokeWidth(dp(blocked ? 2 : 1));
 
-            boolean active = state.active();
-            // BLOCKED describes the previous run, not a permanently disabled controller.
-            // Once the engine has stopped, the same button must become a fresh Start action.
-            primary.setEnabled(active || state.canStart());
-            primary.setIconResource(active
-                    ? (state.paused() ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause)
-                    : android.R.drawable.ic_media_play);
-            primary.setContentDescription(active ? (state.paused() ? "继续任务" : "暂停任务") : "开始任务");
-            primaryLabel.setText(active ? (state.paused() ? "继续" : "暂停") : "开始");
-            stop.setEnabled(active || state.status == OverlayState.Status.BLOCKED);
+            // Transient command states are visible and deliberately non-repeatable. This avoids
+            // double taps silently queueing contradictory pause/resume commands.
+            primary.setEnabled(state.canTogglePause() || state.canContinue() || state.canStart());
+            primary.setIconResource(state.canContinue() || !state.active()
+                    ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause);
+            primary.setContentDescription(state.canContinue() ? "继续任务"
+                    : (state.canStart() ? "开始任务"
+                    : (state.stopping() ? "任务正在停止" : "任务正在暂停")));
+            primaryLabel.setText(state.canContinue() ? "继续"
+                    : (state.canStart() ? "开始"
+                    : (state.stopping() ? "停止中"
+                    : (state.pausing() ? "暂停中" : "暂停"))));
+            primary.setAlpha(primary.isEnabled() ? 1f : 0.55f);
+            stop.setEnabled(state.canStop());
             stop.setAlpha(stop.isEnabled() ? 1f : 0.4f);
+            stopLabel.setText(state.stopping() ? "停止中" : "停止");
             if (newlyBlocked) {
                 setPage(0);
                 panel.setVisibility(View.VISIBLE);
@@ -249,8 +257,12 @@ public final class FloatingOverlayController {
 
         primary = iconButton(android.R.drawable.ic_media_play, "开始任务", RpaPalette.PINK);
         primary.setOnClickListener(view -> {
-            if (lastState != null && lastState.active()) actions.onPauseResumeRequested();
-            else actions.onStartRequested();
+            if (lastState != null
+                    && (lastState.canTogglePause() || lastState.canContinue())) {
+                actions.onPauseResumeRequested();
+            } else if (lastState == null || lastState.canStart()) {
+                actions.onStartRequested();
+            }
         });
         value.addView(primary, square(42));
         primaryLabel = label("开始", 10, RpaPalette.TEXT_MUTED);
@@ -262,7 +274,7 @@ public final class FloatingOverlayController {
         LinearLayout.LayoutParams stopParams = square(42);
         stopParams.topMargin = dp(3);
         value.addView(stop, stopParams);
-        TextView stopLabel = label("停止", 10, RpaPalette.TEXT_MUTED);
+        stopLabel = label("停止", 10, RpaPalette.TEXT_MUTED);
         stopLabel.setGravity(Gravity.CENTER);
         value.addView(stopLabel);
 
@@ -442,10 +454,18 @@ public final class FloatingOverlayController {
 
     private String shortPhase(OverlayState state) {
         if (state.status == OverlayState.Status.BLOCKED) return "需人工处理";
+        if (state.status == OverlayState.Status.FAILED) return "不可恢复";
+        if (state.status == OverlayState.Status.PAUSING) return "暂停中";
         if (state.status == OverlayState.Status.PAUSED) return "已暂停";
+        if (state.status == OverlayState.Status.STOPPING) return "停止中";
         if (state.status == OverlayState.Status.FINISHED) return "已结束";
         if (state.status == OverlayState.Status.IDLE) return "等待";
         return "运行中";
+    }
+
+    private static boolean requiresAttention(OverlayState state) {
+        return state.status == OverlayState.Status.BLOCKED
+                || state.status == OverlayState.Status.FAILED;
     }
 
     private GradientDrawable round(int color, int radiusDp) {

@@ -66,6 +66,26 @@ public final class ActionLedgerTest {
     }
 
     @Test
+    public void probeFindsDuplicateWithoutWritingPreparedTransaction() throws Exception {
+        Fixture fixture = fixture("run-probe-first");
+        ActionLedger.Transaction transaction = fixture.ledger.begin(
+                "comment", "author\ndescription", "hello", new JSONObject()).transaction;
+        transaction.attempted(new JSONObject());
+        transaction.verified(new JSONObject());
+        transaction.committed(new JSONObject());
+
+        File nextRunFile = temporary.newFile("run-probe-next.jsonl");
+        ActionLedger nextRun = new ActionLedger(nextRunFile,
+                fixture.global, "run-probe-next");
+        ActionLedger.BeginResult probe = nextRun.probe(
+                "comment", "author\ndescription", "hello");
+
+        assertEquals(ActionLedger.BeginDisposition.DUPLICATE_COMMITTED,
+                probe.disposition);
+        assertEquals(0L, nextRunFile.length());
+    }
+
+    @Test
     public void attemptedButUnverifiedActionCannotBeRetried() throws Exception {
         Fixture fixture = fixture("run-d1");
         ActionLedger.Transaction transaction = fixture.ledger.begin(
@@ -81,6 +101,43 @@ public final class ActionLedgerTest {
         assertEquals(ActionLedger.BeginDisposition.DUPLICATE_UNCERTAIN,
                 duplicate.disposition);
         assertEquals(ActionLedger.State.UNKNOWN, duplicate.priorState);
+    }
+
+    @Test
+    public void confirmedNotAppliedIsNotCommittedAndIsDeduplicatedWithinRun() throws Exception {
+        Fixture fixture = fixture("run-no-op");
+        ActionLedger.Transaction transaction = fixture.ledger.begin(
+                "favorite", "author\ndescription", "", new JSONObject()).transaction;
+        transaction.attempted(new JSONObject().put("tap", true));
+        transaction.notApplied("stable_state_unchanged",
+                new JSONObject().put("stable_samples", 6));
+
+        ActionLedger.BeginResult duplicate = fixture.ledger.begin(
+                "favorite", "author\ndescription", "", new JSONObject());
+
+        assertEquals(0, fixture.ledger.committedTotal());
+        assertEquals(1, fixture.ledger.notAppliedCount("favorite"));
+        assertEquals(1, fixture.ledger.notAppliedTotal());
+        assertEquals(ActionLedger.BeginDisposition.DUPLICATE_NOT_APPLIED,
+                duplicate.disposition);
+        assertEquals(ActionLedger.State.NOT_APPLIED, duplicate.priorState);
+    }
+
+    @Test
+    public void confirmedNotAppliedCanBeAttemptedOnLaterRun() throws Exception {
+        Fixture fixture = fixture("run-no-op-first");
+        ActionLedger.Transaction transaction = fixture.ledger.begin(
+                "favorite", "author\ndescription", "", new JSONObject()).transaction;
+        transaction.attempted(new JSONObject());
+        transaction.notApplied("stable_state_unchanged", new JSONObject());
+
+        ActionLedger nextRun = new ActionLedger(temporary.newFile("run-no-op-second.jsonl"),
+                fixture.global, "run-no-op-second");
+        ActionLedger.BeginResult retry = nextRun.begin(
+                "favorite", "author\ndescription", "", new JSONObject());
+
+        assertEquals(ActionLedger.BeginDisposition.ALLOWED, retry.disposition);
+        assertTrue(retry.allowed());
     }
 
     @Test

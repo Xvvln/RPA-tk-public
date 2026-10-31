@@ -131,18 +131,6 @@ public final class PageAnalyzer {
         }
         if (videoOptionsSheet) interruptions.add("video_options_sheet");
 
-        ControlResolver.Match commentFieldMatch = ControlResolver.resolve(
-                snapshot, ControlResolver.Role.COMMENT_FIELD);
-        UiNode commentField = commentFieldMatch == null ? null : commentFieldMatch.node;
-        UiNode commentHeader = commentHeader(snapshot);
-        UiNode commentList = commentList(snapshot, commentHeader, commentField);
-        boolean commentClose = ControlResolver.resolve(
-                snapshot, ControlResolver.Role.COMMENT_CLOSE) != null;
-        boolean lowerCommentField = commentField != null && snapshot.displayHeight > 0
-                && commentField.bounds.top + (commentField.bounds.bottom - commentField.bounds.top) / 2
-                >= snapshot.displayHeight * 0.55f;
-        boolean sameCommentPanel = sharesPanelAncestor(commentField, commentList, commentHeader);
-
         ControlResolver.Match searchFieldMatch = ControlResolver.resolve(
                 snapshot, ControlResolver.Role.SEARCH_FIELD);
         UiNode searchFieldNode = searchFieldMatch == null ? null : searchFieldMatch.node;
@@ -153,59 +141,54 @@ public final class PageAnalyzer {
         boolean searchEmpty = contains(systemText, "未找到相关结果", "没有找到相关结果", "no results found", "couldn't find any results");
         int videoActionCount = videoActionCount(snapshot);
 
+        CommentSurfaceContract.Result commentSurface = CommentSurfaceContract.analyze(
+                snapshot, searchResultAnchor);
+        UiNode commentField = commentSurface.composer;
+        UiNode commentHeader = commentSurface.header;
+        UiNode commentList = commentSurface.list;
+        boolean commentClose = commentSurface.close != null;
+        boolean lowerCommentField = commentField != null
+                && commentSurface.inputSurface.normalizedCenterY(commentField) >= 0.68f;
+        boolean sameCommentPanel = commentSurface.evidence.contains("comments:shared_panel");
+        boolean fullCommentContract = commentSurface.state
+                == CommentSurfaceContract.State.PANEL_BROWSING
+                || commentSurface.state == CommentSurfaceContract.State.PANEL_EDITOR_FOCUSED;
+        boolean emptyCommentPanel = commentSurface.evidence.contains("comments:empty_panel");
+        boolean commentModalBlocksFeed = commentSurface.blocksFeedClassification();
+
         List<Candidate> candidates = new ArrayList<>();
-        boolean fullCommentContract = commentHeader != null && commentList != null
-                && lowerCommentField && sameCommentPanel && !(searchField && searchResultAnchor);
         if (fullCommentContract) {
-            candidates.add(candidate(PageState.Page.COMMENTS, commentClose ? 0.98d : 0.94d,
-                    "comments:header", "comments:list", "comments:lower_input",
-                    "comments:shared_panel", commentClose ? "comments:close" : "comments:no_close"));
+            candidates.add(new Candidate(PageState.Page.COMMENTS, commentSurface.confidence,
+                    new ArrayList<>(commentSurface.evidence)));
         }
-        // Empty first-comment panel ("抢沙发") has lower composer but no list rows; still COMMENTS.
-        // Scan nodes directly — systemText() excludes mid-panel copy when a header exists.
-        boolean emptyCommentPanel = lowerCommentField && commentField != null
-                && !searchResultAnchor
-                && hasVisibleText(snapshot,
-                "抢沙发", "喜欢这个作品", "还没有评论", "暂无评论", "成为第一个评论", "抢首评",
-                "be the first to comment", "no comments yet", "first to comment");
-        if (emptyCommentPanel && !fullCommentContract) {
-            candidates.add(candidate(PageState.Page.COMMENTS, 0.92d,
-                    "comments:empty_panel", "comments:lower_input",
-                    commentClose ? "comments:close" : "comments:no_close"));
-        } else if (lowerCommentField && commentField != null && commentClose
-                && !searchResultAnchor && !fullCommentContract) {
-            // Composer + close without list (sheet mid-open / photo post) — still comments sheet.
-            candidates.add(candidate(PageState.Page.COMMENTS, 0.86d,
-                    "comments:composer_close", "comments:lower_input", "comments:close"));
-        }
-        if (searchField && searchEmpty && videoActionCount < 2 && !fullCommentContract) {
+        if (searchField && searchEmpty && videoActionCount < 2 && !commentModalBlocksFeed) {
             candidates.add(candidate(PageState.Page.SEARCH_EMPTY, 0.94d,
                     "search:field", "search:empty_message"));
         }
-        if (searchField && searchSubmit && videoActionCount < 2 && !fullCommentContract) {
+        if (searchField && searchSubmit && videoActionCount < 2 && !commentModalBlocksFeed) {
             candidates.add(candidate(PageState.Page.SEARCH_INPUT, 0.91d,
                     "search:field", "search:submit"));
         }
-        if (searchField && searchResultAnchor && videoActionCount < 2 && !fullCommentContract) {
+        if (searchField && searchResultAnchor && videoActionCount < 2 && !commentModalBlocksFeed) {
             candidates.add(candidate(PageState.Page.SEARCH_RESULTS, 0.90d,
                     "search:field", "search:results_anchor"));
         }
         // Related-query chips under a result ("其他人搜索的内容") without a full video rail.
         boolean relatedSearchSection = hasVisibleText(snapshot,
                 "其他人搜索的内容", "相关搜索", "people also searched", "others searched");
-        if (relatedSearchSection && videoActionCount < 2 && !fullCommentContract
+        if (relatedSearchSection && videoActionCount < 2 && !commentModalBlocksFeed
                 && !emptyCommentPanel) {
             candidates.add(candidate(PageState.Page.SEARCH_RESULTS, 0.88d,
                     "search:related_queries"));
         }
         // A video opened from search may retain a top search field. Two independent visible
         // actions are required, and a live results grid is strong counter-evidence.
-        if (videoActionCount >= 2 && !searchResultAnchor && !fullCommentContract) {
+        if (videoActionCount >= 2 && !searchResultAnchor && !commentModalBlocksFeed) {
             candidates.add(candidate(PageState.Page.FEED, videoActionCount >= 3 ? 0.92d : 0.86d,
                     "feed:video_actions=" + videoActionCount));
         }
         // Search-detail / photo players often expose only 1 resolvable rail control for a frame.
-        if (videoActionCount == 1 && searchField && !searchResultAnchor && !fullCommentContract
+        if (videoActionCount == 1 && searchField && !searchResultAnchor && !commentModalBlocksFeed
                 && !emptyCommentPanel && !relatedSearchSection) {
             candidates.add(candidate(PageState.Page.FEED, 0.80d,
                     "feed:search_player_weak_actions=1"));
@@ -215,7 +198,7 @@ public final class PageAnalyzer {
         // previously collapsed to UNKNOWN mid-watch (unexpected_page).
         boolean liveSurface = isLiveSurface(systemText);
         boolean recommendationChrome = hasRecommendationChrome(snapshot);
-        if (liveSurface && recommendationChrome && !searchResultAnchor && !fullCommentContract) {
+        if (liveSurface && recommendationChrome && !searchResultAnchor && !commentModalBlocksFeed) {
             candidates.add(candidate(PageState.Page.FEED, 0.90d,
                     "feed:live_surface", "home:recommendation_chrome"));
         }
@@ -239,6 +222,12 @@ public final class PageAnalyzer {
                 ? unresolvedEvidence(commentField, commentList, commentHeader, lowerCommentField,
                 sameCommentPanel, searchField, searchSubmit, searchResultAnchor, videoActionCount)
                 : new ArrayList<>(selected.evidence);
+        for (String item : commentSurface.evidence) {
+            if (!evidence.contains(item)) evidence.add(item);
+        }
+        evidence.add("input_surface:" + commentSurface.inputSurface.kind.name()
+                .toLowerCase(Locale.ROOT));
+        if (!commentModalBlocksFeed) evidence.add("comments:modal_absent");
         evidence.add("foreground:" + foreground.source.name().toLowerCase(Locale.ROOT));
         evidence.add(String.format(Locale.ROOT, "foreground_confidence:%.2f", foreground.confidence));
         evidence.addAll(foreground.evidence);
@@ -252,11 +241,15 @@ public final class PageAnalyzer {
         }
 
         if (page == PageState.Page.COMMENTS) interruptions.add("comments_open");
-        // Partial composer after send: not full COMMENTS page, but recoverable when FEED expected.
-        if (page == PageState.Page.UNKNOWN && lowerCommentField && commentField != null
+        // Transitional/partial comment UI is recoverable but may never authorize FEED.
+        if (page == PageState.Page.UNKNOWN
+                && (commentModalBlocksFeed
+                || commentSurface.state == CommentSurfaceContract.State.INLINE_COMPOSER)
                 && !searchResultAnchor) {
             interruptions.add("comments_open");
-            evidence.add("comments:partial_composer_recoverable");
+            if (commentSurface.state == CommentSurfaceContract.State.INLINE_COMPOSER) {
+                evidence.add("comments:partial_composer_recoverable");
+            }
         }
         if (page == PageState.Page.INBOX) interruptions.add("inbox_page");
         String contentKind = "none";
@@ -400,19 +393,6 @@ public final class PageAnalyzer {
         return null;
     }
 
-    private static UiNode commentList(UiSnapshot snapshot, UiNode header, UiNode field) {
-        if (header == null || field == null || header.windowId != field.windowId) return null;
-        for (UiNode node : snapshot.nodes) {
-            if (!snapshot.isVisible(node) || node.windowId != field.windowId || node.text.trim().length() < 2
-                    || centerY(node) <= header.bounds.bottom || centerY(node) >= field.bounds.top) continue;
-            boolean knownId = node.id.endsWith(":id/eu1") || node.id.endsWith(":id/euj");
-            boolean textShape = (node.className.contains("Text") || node.className.startsWith("X."))
-                    && node.bounds.right - node.bounds.left > snapshot.displayWidth * 0.25f;
-            if (knownId || textShape) return node;
-        }
-        return null;
-    }
-
     private static boolean hasSearchResultContract(UiSnapshot snapshot, UiNode field) {
         if (field == null) return false;
         if (hasVisibleSuffix(snapshot, ":id/mui", ":id/viewpager_search")
@@ -444,26 +424,6 @@ public final class PageAnalyzer {
         if (favorite) count++;
         if (share) count++;
         return count;
-    }
-
-    /** Nodes must belong to one window and share a non-root container in the captured tree. */
-    private static boolean sharesPanelAncestor(UiNode... nodes) {
-        if (nodes.length == 0 || nodes[0] == null || nodes[0].treePath.isEmpty()) return false;
-        int windowId = nodes[0].windowId;
-        String[] common = nodes[0].treePath.split("/");
-        int commonLength = common.length;
-        for (int index = 1; index < nodes.length; index++) {
-            UiNode node = nodes[index];
-            if (node == null || node.windowId != windowId || node.treePath.isEmpty()) return false;
-            String[] path = node.treePath.split("/");
-            commonLength = Math.min(commonLength, path.length);
-            int part = 0;
-            while (part < commonLength && common[part].equals(path[part])) part++;
-            commonLength = part;
-        }
-        // "0" is the window root. Requiring one additional shared component proves that the
-        // anchors live in the same child container rather than merely somewhere in the window.
-        return commonLength >= 2;
     }
 
     private static Candidate candidate(PageState.Page page, double score, String... evidence) {

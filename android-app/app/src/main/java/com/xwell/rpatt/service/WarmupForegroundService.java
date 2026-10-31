@@ -21,6 +21,7 @@ import com.xwell.rpatt.SettingsActivity;
 import com.xwell.rpatt.automation.AccessibilityGateway;
 import com.xwell.rpatt.automation.PageAnalyzer;
 import com.xwell.rpatt.automation.PageState;
+import com.xwell.rpatt.automation.UiSnapshot;
 import com.xwell.rpatt.automation.WarmupAccessibilityService;
 import com.xwell.rpatt.config.ConfigStore;
 import com.xwell.rpatt.engine.RunSnapshot;
@@ -102,12 +103,12 @@ public final class WarmupForegroundService extends Service
         if (overlay != null) overlay.render(RunUiStateMapper.toOverlayState(snapshot));
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.notify(NOTIFICATION_ID, notification(snapshot));
-        boolean newlyBlocked = snapshot.status == RunSnapshot.Status.BLOCKED
-                && lastStatus != RunSnapshot.Status.BLOCKED;
-        if (newlyBlocked) {
+        boolean newlyNeedsAttention = requiresAttention(snapshot.status)
+                && !requiresAttention(lastStatus);
+        if (newlyNeedsAttention) {
             manager.notify(ATTENTION_NOTIFICATION_ID, attentionNotification(snapshot));
             vibrateForBlock();
-        } else if (snapshot.status != RunSnapshot.Status.BLOCKED) {
+        } else if (!requiresAttention(snapshot.status)) {
             manager.cancel(ATTENTION_NOTIFICATION_ID);
         }
         lastStatus = snapshot.status;
@@ -135,8 +136,9 @@ public final class WarmupForegroundService extends Service
 
     @Override public void onStartRequested() { session.start(); }
     @Override public void onPauseResumeRequested() {
-        if (session.current().status == RunSnapshot.Status.PAUSED) returnToTask();
-        else session.pauseIfRunning();
+        if (session.current().status == RunSnapshot.Status.PAUSED
+                || session.current().status == RunSnapshot.Status.BLOCKED) returnToTask();
+        else if (session.current().status == RunSnapshot.Status.RUNNING) session.pauseIfRunning();
     }
     @Override public void onStopRequested() { session.stop(); }
     @Override public void onChooseProfileRequested() { openActivity(SettingsActivity.class); }
@@ -153,7 +155,7 @@ public final class WarmupForegroundService extends Service
         channel.setDescription("显示本机浏览任务状态与暂停/停止入口");
         NotificationChannel attention = new NotificationChannel(ATTENTION_CHANNEL,
                 "任务异常提醒", NotificationManager.IMPORTANCE_HIGH);
-        attention.setDescription("任务停止且需要人工处理时显示醒目提醒");
+        attention.setDescription("任务中断或不可恢复时显示醒目提醒");
         attention.enableVibration(true);
         attention.setVibrationPattern(new long[] {0, 250, 150, 350});
         NotificationManager manager = getSystemService(NotificationManager.class);
@@ -166,15 +168,26 @@ public final class WarmupForegroundService extends Service
                 new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = new Notification.Builder(this, CHANNEL);
         builder.setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("TK养号助手 · " + snapshot.status.name())
+                .setContentTitle("TK养号助手 · " + statusLabel(snapshot.status))
                 .setContentText(snapshot.phase + " · " + snapshot.step + " · " + snapshot.videosSeen + "/" + snapshot.videoLimit)
                 .setContentIntent(open)
-                .setOngoing(snapshot.status == RunSnapshot.Status.RUNNING || snapshot.status == RunSnapshot.Status.PAUSED)
+                .setOngoing(isActive(snapshot.status))
                 .setColor(Color.rgb(255, 44, 85));
         if (snapshot.status == RunSnapshot.Status.RUNNING || snapshot.status == RunSnapshot.Status.PAUSED) {
             builder.addAction(new Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_media_pause),
                     snapshot.status == RunSnapshot.Status.PAUSED ? "继续" : "暂停", command(ACTION_PAUSE, 2)).build());
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                    "停止", command(ACTION_STOP, 3)).build());
+        } else if (snapshot.status == RunSnapshot.Status.PAUSING) {
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                    "停止", command(ACTION_STOP, 3)).build());
+        } else if (snapshot.status == RunSnapshot.Status.BLOCKED) {
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_play),
+                    "继续", command(ACTION_RETURN_TO_TASK, 2)).build());
             builder.addAction(new Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
                     "停止", command(ACTION_STOP, 3)).build());
@@ -189,9 +202,13 @@ public final class WarmupForegroundService extends Service
                 ? snapshot.step : snapshot.message;
         return new Notification.Builder(this, ATTENTION_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
-                .setContentTitle("任务已停止，需要人工处理")
+                .setContentTitle(snapshot.status == RunSnapshot.Status.BLOCKED
+                        ? "任务已中断，处理后可继续" : "任务已停止，需要人工处理")
                 .setContentText(reason)
-                .setStyle(new Notification.BigTextStyle().bigText(reason + "\n点击查看运行日志和处理入口。"))
+                .setStyle(new Notification.BigTextStyle().bigText(reason
+                        + (snapshot.status == RunSnapshot.Status.BLOCKED
+                        ? "\n处理现场后可返回 TikTok 继续。"
+                        : "\n点击查看运行日志和处理入口。")))
                 .setContentIntent(open)
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_ERROR)
@@ -243,11 +260,16 @@ public final class WarmupForegroundService extends Service
         if (launch == null) return;
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         startActivity(launch);
-        waitForStableFeedThenResume(0, 0);
+        waitForStableFeedThenContinue(0, 0);
     }
 
     private void requestControlOpen() {
-        if (session.current().status != RunSnapshot.Status.RUNNING) {
+        RunSnapshot.Status status = session.current().status;
+        if (status == RunSnapshot.Status.PAUSING) {
+            waitForCheckpointThenOpen(0);
+            return;
+        }
+        if (status != RunSnapshot.Status.RUNNING) {
             openActivity(MainActivity.class, true);
             return;
         }
@@ -273,35 +295,71 @@ public final class WarmupForegroundService extends Service
         mainHandler.postDelayed(() -> waitForCheckpointThenOpen(attempt + 1), 100L);
     }
 
-    private void waitForStableFeedThenResume(int attempt, int consecutive) {
-        if (session == null || session.current().status != RunSnapshot.Status.PAUSED) return;
+    private void waitForStableFeedThenContinue(int attempt, int consecutive) {
+        if (session == null) return;
+        RunSnapshot.Status status = session.current().status;
+        if (status != RunSnapshot.Status.PAUSED
+                && status != RunSnapshot.Status.BLOCKED) return;
         int stable = 0;
         try {
             if (WarmupAccessibilityService.isConnected()) {
                 AccessibilityGateway gateway = AccessibilityGateway.require();
-                PageState state = PageAnalyzer.analyze(
-                        gateway.snapshot(), true);
-                if (state.page == PageState.Page.FEED && state.blockers.isEmpty()) {
+                UiSnapshot observed = gateway.snapshot();
+                PageState state = PageAnalyzer.analyze(observed, true);
+                boolean ready = status == RunSnapshot.Status.BLOCKED
+                        ? PageAnalyzer.TIKTOK_PACKAGE.equals(observed.foregroundPackage)
+                        : state.page == PageState.Page.FEED && state.blockers.isEmpty();
+                if (ready) {
                     stable = consecutive + 1;
                 }
             }
         } catch (Exception ignored) {}
         if (stable >= 2) {
-            session.resumeIfPaused();
+            if (status == RunSnapshot.Status.PAUSED) session.resumeIfPaused();
+            else session.continueIfBlocked();
             return;
         }
         if (attempt >= 80) {
             Toast.makeText(this,
-                    "TikTok 页面尚未稳定，任务保持暂停", Toast.LENGTH_LONG).show();
+                    status == RunSnapshot.Status.BLOCKED
+                            ? "TikTok 尚未回到前台，任务保持中断"
+                            : "TikTok 页面尚未稳定，任务保持暂停",
+                    Toast.LENGTH_LONG).show();
             return;
         }
         final int nextStable = stable;
         mainHandler.postDelayed(
-                () -> waitForStableFeedThenResume(attempt + 1, nextStable), 150L);
+                () -> waitForStableFeedThenContinue(attempt + 1, nextStable), 150L);
     }
 
     private PendingIntent command(String action, int requestCode) {
         Intent intent = new Intent(this, WarmupForegroundService.class).setAction(action);
         return PendingIntent.getService(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    private static boolean isActive(RunSnapshot.Status status) {
+        return status == RunSnapshot.Status.RUNNING
+                || status == RunSnapshot.Status.PAUSING
+                || status == RunSnapshot.Status.PAUSED
+                || status == RunSnapshot.Status.STOPPING
+                || status == RunSnapshot.Status.BLOCKED;
+    }
+
+    private static String statusLabel(RunSnapshot.Status status) {
+        switch (status) {
+            case RUNNING: return "运行中";
+            case PAUSING: return "暂停中";
+            case PAUSED: return "已暂停";
+            case STOPPING: return "停止中";
+            case BLOCKED: return "需处理";
+            case FAILED: return "不可恢复";
+            case FINISHED: return "已结束";
+            default: return "等待";
+        }
+    }
+
+    private static boolean requiresAttention(RunSnapshot.Status status) {
+        return status == RunSnapshot.Status.BLOCKED
+                || status == RunSnapshot.Status.FAILED;
     }
 }

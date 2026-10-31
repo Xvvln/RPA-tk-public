@@ -112,6 +112,53 @@ public final class VideoContent {
 
     public String fingerprint() { return author.trim() + "\n" + description.trim(); }
 
+    /**
+     * Compare a previously captured video identity without requiring TikTok's description
+     * affordance to remain byte-for-byte identical. TikTok may replace a truncated “…展开” value
+     * with the expanded text while a modal opens or closes.
+     */
+    public static boolean matchesFingerprint(String expectedFingerprint, VideoContent observed) {
+        if (expectedFingerprint == null || expectedFingerprint.isEmpty() || observed == null) {
+            return false;
+        }
+        int separator = expectedFingerprint.indexOf('\n');
+        String expectedAuthor = separator < 0
+                ? expectedFingerprint : expectedFingerprint.substring(0, separator);
+        String expectedDescription = separator < 0
+                ? "" : expectedFingerprint.substring(separator + 1);
+        String normalizedExpectedAuthor = normalizeIdentityText(expectedAuthor, false);
+        String normalizedObservedAuthor = normalizeIdentityText(observed.author, false);
+        if (!normalizedExpectedAuthor.equals(normalizedObservedAuthor)) return false;
+
+        String normalizedExpectedDescription =
+                normalizeIdentityText(expectedDescription, true);
+        String normalizedObservedDescription =
+                normalizeIdentityText(observed.description, true);
+        if (normalizedExpectedDescription.equals(normalizedObservedDescription)) {
+            return !normalizedExpectedAuthor.isEmpty()
+                    || !normalizedExpectedDescription.isEmpty();
+        }
+        if (normalizedExpectedDescription.isEmpty()
+                || normalizedObservedDescription.isEmpty()) return false;
+        boolean expectedIsShorter = normalizedExpectedDescription.length()
+                <= normalizedObservedDescription.length();
+        String shorter = expectedIsShorter
+                ? normalizedExpectedDescription : normalizedObservedDescription;
+        String longer = expectedIsShorter
+                ? normalizedObservedDescription : normalizedExpectedDescription;
+        return shorter.length() >= 24 && longer.startsWith(shorter);
+    }
+
+    private static String normalizeIdentityText(String value, boolean description) {
+        String normalized = value == null ? "" : value.toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", " ").trim();
+        if (!description) return normalized;
+        return normalized
+                .replaceFirst("(?:…|\\.\\.\\.)\\s*(?:展开|more)?\\s*$", "")
+                .replaceFirst("\\s+(?:展开|more)\\s*$", "")
+                .trim();
+    }
+
     /** External writes require both independent fields so recycled pager nodes are not enough. */
     public boolean hasStableActionIdentity() {
         return !author.trim().isEmpty() && !description.trim().isEmpty();

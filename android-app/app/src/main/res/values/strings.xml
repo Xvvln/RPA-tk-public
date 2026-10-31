@@ -1,4 +1,6 @@
 <resources>
     <string name="app_name">TK养号助手</string>
-    <string name="accessibility_description">只在本机读取 TikTok 页面并执行用户从悬浮窗启动的固定浏览流程；登录、验证码与敏感弹窗交由人工处理。</string>
+    <!-- Shown in system Accessibility settings; include the product name so users can find it. -->
+    <string name="accessibility_service_label">TK养号助手 · 页面操作辅助</string>
+    <string name="accessibility_description">在本机提供页面阅读与操作辅助。登录、验证与敏感确认由用户自行处理。</string>
 </resources>

@@ -64,6 +64,37 @@ public final class ControlResolver {
         return best;
     }
 
+    /**
+     * A browse action has no useful work when the right-rail entry explicitly says that the video
+     * has no comments. Inspect the actionable wrapper and its semantic descendants because TikTok
+     * may move the label away from the clickable node between releases.
+     */
+    public static boolean isDefinitelyEmptyCommentEntry(UiSnapshot snapshot, UiNode entry) {
+        if (snapshot == null || entry == null) return false;
+        for (UiNode node : snapshot.nodes) {
+            if (!PageAnalyzer.TIKTOK_PACKAGE.equals(node.packageName)
+                    || !snapshot.isVisible(node)
+                    || node.windowId != entry.windowId) continue;
+            boolean sameNode = node == entry;
+            boolean descendant = !entry.treePath.isEmpty()
+                    && node.treePath.startsWith(entry.treePath + "/");
+            boolean insideEntry = containsPoint(entry, centerX(node), centerY(node));
+            if ((sameNode || descendant || insideEntry)
+                    && hasEmptyCommentSemantics(node.searchableText())) return true;
+        }
+        return hasEmptyCommentSemantics(entry.searchableText());
+    }
+
+    private static boolean hasEmptyCommentSemantics(String value) {
+        String normalized = value == null ? "" : value.toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", " ").trim();
+        return contains(normalized, "抢首评", "抢沙发", "暂无评论", "还没有评论",
+                "成为第一个评论", "be the first to comment", "no comments yet",
+                "first to comment")
+                || normalized.matches(".*(?:^|\\D)0\\s*条?\\s*评论(?:\\D|$).*")
+                || normalized.matches(".*\\b0\\s+comments?\\b.*");
+    }
+
     private static Match score(UiSnapshot snapshot, Role role, UiNode node, UiNode anchor) {
         if (!PageAnalyzer.TIKTOK_PACKAGE.equals(node.packageName) || !snapshot.isVisible(node)) return null;
         int width = snapshot.displayWidth;
@@ -85,11 +116,14 @@ public final class ControlResolver {
                 return match(node, 0.80d + (known(node.id, PageAnalyzer.SEARCH_FIELD_IDS) ? 0.12d : 0d),
                         evidence, known(node.id, PageAnalyzer.SEARCH_FIELD_IDS) ? "known_id_bonus" : "geometry_only");
             case COMMENT_FIELD:
-                if (!"android.widget.EditText".equals(node.className)
-                        || centerY < height * 0.78f
+                if (!InputSurfaceDetector.isEditable(node)
                         || node.bounds.right - node.bounds.left < width * 0.30f) return null;
+                InputSurfaceDetector.Result inputSurface = InputSurfaceDetector.analyze(snapshot);
+                float relativeCenterY = inputSurface.normalizedCenterY(node);
+                if (relativeCenterY < 0.68f) return null;
                 evidence.add("edit_text");
-                evidence.add("lower_screen");
+                evidence.add("lower_usable_viewport");
+                if (inputSurface.hasInputMethodWindow()) evidence.add("input_method_aware");
                 return match(node, 0.82d + (known(node.id, PageAnalyzer.COMMENT_FIELD_IDS) ? 0.12d : 0d),
                         evidence, known(node.id, PageAnalyzer.COMMENT_FIELD_IDS) ? "known_id_bonus" : "geometry_only");
             case SEARCH_SUBMIT:
@@ -124,7 +158,7 @@ public final class ControlResolver {
                         new String[] {"关注 ", "follow "});
             case COMMENT_CLOSE:
                 if (!node.clickable || !contains(semantic, "关闭", "close")
-                        || centerY < height * 0.25f || centerY > height * 0.55f) return null;
+                        || centerY < height * 0.18f || centerY > height * 0.70f) return null;
                 evidence.add("close_semantic");
                 evidence.add("comment_header_region");
                 return match(node, 0.91d, evidence);

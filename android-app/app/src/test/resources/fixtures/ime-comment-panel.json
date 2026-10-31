@@ -1,0 +1,114 @@
+{
+  "captured_at": 1785120062257,
+  "foreground_package": "com.zhiliaoapp.musically",
+  "display_width": 1080,
+  "display_height": 2400,
+  "windows": [
+    {
+      "id": 8573,
+      "package": "com.vendor.keyboard",
+      "type": 2,
+      "layer": 1,
+      "active": false,
+      "focused": false,
+      "accessibility_focused": false,
+      "root_available": true,
+      "bounds": {"left": 0, "top": 1500, "right": 1080, "bottom": 2400}
+    },
+    {
+      "id": 8597,
+      "package": "com.zhiliaoapp.musically",
+      "type": 1,
+      "layer": 0,
+      "active": true,
+      "focused": true,
+      "accessibility_focused": false,
+      "root_available": true,
+      "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 2400}
+    }
+  ],
+  "nodes": [
+    {
+      "id": "",
+      "text": "推荐",
+      "description": "",
+      "class": "android.widget.TextView",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": false,
+      "visible_to_user": true,
+      "window_id": 8597,
+      "tree_path": "0/0/1",
+      "bounds": {"left": 760, "top": 100, "right": 940, "bottom": 220}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/veb",
+      "text": "评论",
+      "description": "",
+      "class": "android.widget.TextView",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": false,
+      "visible_to_user": true,
+      "window_id": 8597,
+      "tree_path": "0/0/0/0/1/1/0/0/2/0/1/0/3/0/0/0",
+      "bounds": {"left": 465, "top": 949, "right": 615, "bottom": 1082}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/bna",
+      "text": "",
+      "description": "关闭",
+      "class": "android.widget.ImageView",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 8597,
+      "tree_path": "0/0/0/0/1/1/0/0/2/0/1/0/3/0/1/2",
+      "bounds": {"left": 984, "top": 985, "right": 1044, "bottom": 1045}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/eb3",
+      "text": "添加评论...",
+      "description": "",
+      "class": "android.widget.EditText",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "focusable": true,
+      "focused": true,
+      "editable": true,
+      "drawing_order": 3,
+      "window_id": 8597,
+      "tree_path": "0/0/0/0/1/1/2/0/0/0/1/0/0/1/2/0/0/0/0/0/0/3",
+      "bounds": {"left": 216, "top": 1155, "right": 1002, "bottom": 1317}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/fux",
+      "text": "",
+      "description": "点赞视频。10 个赞",
+      "class": "android.widget.Button",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 8597,
+      "tree_path": "0/1/1",
+      "bounds": {"left": 888, "top": 1299, "right": 1080, "bottom": 1479}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/efj",
+      "text": "",
+      "description": "阅读或添加评论。抢首评 条评论",
+      "class": "android.widget.Button",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 8597,
+      "tree_path": "0/1/2",
+      "bounds": {"left": 888, "top": 1479, "right": 1080, "bottom": 1659}
+    }
+  ]
+}

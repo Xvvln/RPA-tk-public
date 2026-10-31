@@ -10,7 +10,8 @@ import java.util.List;
 
 /** Configuration for the fixed safety skeleton and configurable action workflow. */
 public final class WarmupConfig {
-    public static final int SCHEMA_VERSION = 4;
+    public static final int SCHEMA_VERSION = 6;
+    public static final double DEFAULT_ENABLED_COMMENT_RATE = 0.10d;
     public static final String JOURNEY_ORDERED = "ordered";
     public static final String JOURNEY_RECOMMENDATION_LED = "recommendation_led";
     public static final String STEP_COMMENTS = "comments";
@@ -64,6 +65,8 @@ public final class WarmupConfig {
 
     public List<String> interestKeywords = new ArrayList<>();
     public boolean interestEnabled = false;
+    /** Treat a positive-interest miss as an explicit "not interested" signal. */
+    public boolean unmatchedAsNotInterested = false;
     public int interestWatchExtraMinSeconds = 0;
     public int interestWatchExtraMaxSeconds = 0;
     public List<String> notInterestedKeywords = new ArrayList<>();
@@ -109,26 +112,142 @@ public final class WarmupConfig {
         WarmupConfig config = new WarmupConfig();
         config.profile = profile;
         if ("normal".equals(profile)) {
+            config.sourceOrder = new ArrayList<>(Arrays.asList(SOURCE_FEED, SOURCE_SEARCH));
             config.maxMinutes = 30;
             config.videoCount = 20;
+            config.journeyMode = JOURNEY_RECOMMENDATION_LED;
+            config.recommendationBootstrapVideos = 5;
+            config.recommendationSignalHits = 2;
+            config.recommendationSearchCooldownVideos = 7;
+            config.searchPick = "random";
+            config.maxSearches = 2;
+            config.videosPerKeyword = 2;
+            config.watchMinSeconds = 8;
+            config.watchMaxSeconds = 24;
+            config.swipePace = "natural";
+            config.pauseMinSeconds = 1;
+            config.pauseMaxSeconds = 4;
+            config.commentReadRate = 0.45;
+            config.commentMinSeconds = 4;
+            config.commentMaxSeconds = 12;
+            config.commentScrolls = 2;
+            config.replyThreads = 1;
+            config.interestWatchExtraMinSeconds = 2;
+            config.interestWatchExtraMaxSeconds = 7;
             config.likeRate = 0.20;
+            config.maxLikes = 4;
             config.favoriteRate = 0.08;
+            config.maxFavorites = 2;
+            config.commentRate = 0.05;
+            config.maxComments = 1;
+            config.followEnabled = true;
+            config.followRate = 0.03;
+            config.maxFollows = 1;
+            config.shareEnabled = false;
+            config.notInterestedRate = 0.50;
+            config.maxNotInterested = 2;
             config.workflowOrder = new ArrayList<>(Arrays.asList(
-                    STEP_LIKE, STEP_COMMENTS, STEP_FAVORITE, STEP_FOLLOW,
+                    STEP_COMMENTS, STEP_LIKE, STEP_FAVORITE, STEP_FOLLOW,
                     STEP_COMMENT, STEP_SHARE, STEP_NOT_INTERESTED));
         } else if ("active".equals(profile)) {
+            config.sourceOrder = new ArrayList<>(Arrays.asList(SOURCE_FEED, SOURCE_SEARCH));
             config.maxMinutes = 45;
             config.videoCount = 30;
-            config.likeRate = 0.25;
-            config.favoriteRate = 0.10;
+            config.journeyMode = JOURNEY_RECOMMENDATION_LED;
+            config.recommendationBootstrapVideos = 3;
+            config.recommendationSignalHits = 1;
+            config.recommendationSearchCooldownVideos = 4;
+            config.searchPick = "random";
+            config.maxSearches = 4;
+            config.videosPerKeyword = 3;
+            config.watchMinSeconds = 8;
+            config.watchMaxSeconds = 30;
+            config.swipePace = "natural";
+            config.pauseMinSeconds = 1;
+            config.pauseMaxSeconds = 3;
+            config.commentReadRate = 0.70;
+            config.commentMinSeconds = 6;
+            config.commentMaxSeconds = 18;
+            config.commentScrolls = 3;
+            config.replyThreads = 2;
+            config.interestWatchExtraMinSeconds = 4;
+            config.interestWatchExtraMaxSeconds = 12;
+            config.likeRate = 0.30;
+            config.maxLikes = 8;
+            config.favoriteRate = 0.15;
+            config.maxFavorites = 4;
+            config.commentRate = 0.10;
+            config.maxComments = 2;
+            config.followEnabled = true;
+            config.followRate = 0.08;
+            config.maxFollows = 2;
+            config.shareEnabled = true;
+            config.shareRate = 0.04;
+            config.maxShares = 2;
+            config.notInterestedRate = 0.75;
+            config.maxNotInterested = 3;
             config.workflowOrder = new ArrayList<>(Arrays.asList(
                     STEP_LIKE, STEP_FAVORITE, STEP_COMMENTS, STEP_FOLLOW,
                     STEP_COMMENT, STEP_SHARE, STEP_NOT_INTERESTED));
+        } else if ("cold".equals(profile)) {
+            config.sourceOrder = new ArrayList<>(Arrays.asList(SOURCE_FEED, SOURCE_SEARCH));
+            config.maxMinutes = 20;
+            config.videoCount = 12;
+            config.journeyMode = JOURNEY_ORDERED;
+            config.recommendationBootstrapVideos = 6;
+            config.recommendationSignalHits = 3;
+            config.recommendationSearchCooldownVideos = 8;
+            config.maxSearches = 1;
+            config.videosPerKeyword = 2;
+            config.watchMinSeconds = 10;
+            config.watchMaxSeconds = 24;
+            config.swipePace = "slow";
+            config.pauseMinSeconds = 2;
+            config.pauseMaxSeconds = 5;
+            config.commentReadRate = 0.25;
+            config.commentMinSeconds = 3;
+            config.commentMaxSeconds = 8;
+            config.commentScrolls = 1;
+            config.replyThreads = 0;
+            config.likeRate = 0.10;
+            config.maxLikes = 2;
+            config.favoriteRate = 0.03;
+            config.maxFavorites = 1;
+            config.commentRate = 0.0;
+            config.maxComments = 0;
+            config.followEnabled = false;
+            config.shareEnabled = false;
+            config.notInterestedRate = 0.35;
+            config.maxNotInterested = 1;
         }
         // The current product flow executes the configured interactions directly.
         config.interactionsApply = true;
         config.followApply = true;
         config.notInterestedEnabled = false;
+        return config;
+    }
+
+    /**
+     * Applies a built-in behavior preset while retaining user-authored keyword and comment text.
+     * A preset may enable a text-dependent module only when its required content is complete.
+     */
+    public static WarmupConfig presetFor(String profile, WarmupConfig authored) {
+        WarmupConfig config = defaultsFor(profile);
+        if (authored == null) return config;
+
+        config.searchKeywords = clean(authored.searchKeywords);
+        config.interestKeywords = clean(authored.interestKeywords);
+        config.unmatchedAsNotInterested = authored.unmatchedAsNotInterested;
+        config.notInterestedKeywords = clean(authored.notInterestedKeywords);
+        config.commentTexts = clean(authored.commentTexts);
+
+        config.interestEnabled = !config.interestKeywords.isEmpty();
+        config.notInterestedEnabled = !config.notInterestedKeywords.isEmpty();
+        boolean canSearchFromInterestSignals = !config.searchKeywords.isEmpty()
+                && config.interestEnabled;
+        config.searchEnabled = !"cold".equals(profile) && canSearchFromInterestSignals;
+        config.commentEnabled = !"cold".equals(profile) && !config.commentTexts.isEmpty();
+        config.validate();
         return config;
     }
 
@@ -187,8 +306,14 @@ public final class WarmupConfig {
         if (notInterestedEnabled && clean(notInterestedKeywords).isEmpty()) {
             throw new IllegalArgumentException("开启不感兴趣后至少需要一个负向关键词");
         }
-        if (commentEnabled && commentRate > 0 && clean(commentTexts).isEmpty()) {
-            throw new IllegalArgumentException("评论概率大于 0 时必须填写候选评论");
+        if (commentEnabled && commentRate <= 0) {
+            throw new IllegalArgumentException("已开启发布评论，但发布概率为 0%；请设置为 1–100% 或关闭评论");
+        }
+        if (commentEnabled && maxComments <= 0) {
+            throw new IllegalArgumentException("已开启发布评论，但单次任务上限为 0");
+        }
+        if (commentEnabled && clean(commentTexts).isEmpty()) {
+            throw new IllegalArgumentException("开启发布评论后必须填写候选评论");
         }
         if (!"random".equals(searchPick) && !"sequential".equals(searchPick)) {
             throw new IllegalArgumentException("search.pick 只能是 random 或 sequential");
@@ -245,6 +370,7 @@ public final class WarmupConfig {
             root.put("interest", new JSONObject()
                     .put("enabled", interestEnabled)
                     .put("keywords", array(clean(interestKeywords)))
+                    .put("unmatched_as_not_interested", unmatchedAsNotInterested)
                     .put("extra_watch_seconds", new JSONArray()
                             .put(interestWatchExtraMinSeconds)
                             .put(interestWatchExtraMaxSeconds)));
@@ -293,6 +419,7 @@ public final class WarmupConfig {
     }
 
     public static WarmupConfig fromJson(JSONObject root) {
+        int storedSchemaVersion = root.optInt("schema_version", 1);
         WarmupConfig config = defaultsFor(root.optString("profile", "cold"));
         config.sourceOrder = normalizeOrder(
                 strings(root.optJSONArray("source_order")), SOURCE_STEPS, config.sourceOrder);
@@ -359,6 +486,8 @@ public final class WarmupConfig {
             if (interest != null) {
                 config.interestKeywords = strings(interest.optJSONArray("keywords"));
                 config.interestEnabled = interest.optBoolean("enabled", !config.interestKeywords.isEmpty());
+                config.unmatchedAsNotInterested = interest.optBoolean(
+                        "unmatched_as_not_interested", false);
                 int[] extraWatch = pair(interest.optJSONArray("extra_watch_seconds"),
                         config.interestWatchExtraMinSeconds, config.interestWatchExtraMaxSeconds);
                 config.interestWatchExtraMinSeconds = extraWatch[0];
@@ -376,6 +505,8 @@ public final class WarmupConfig {
         } else if (interest != null) {
             config.interestKeywords = strings(interest.optJSONArray("keywords"));
             config.interestEnabled = interest.optBoolean("enabled", !config.interestKeywords.isEmpty());
+            config.unmatchedAsNotInterested = interest.optBoolean(
+                    "unmatched_as_not_interested", false);
             int[] extraWatch = pair(interest.optJSONArray("extra_watch_seconds"),
                     config.interestWatchExtraMinSeconds, config.interestWatchExtraMaxSeconds);
             config.interestWatchExtraMinSeconds = extraWatch[0];
@@ -423,13 +554,35 @@ public final class WarmupConfig {
             config.startCollapsed = overlay.optBoolean("start_collapsed", true);
             config.vibrateOnBlock = overlay.optBoolean("vibrate_on_block", true);
         }
+        if (storedSchemaVersion < 5 && config.commentEnabled && config.commentRate <= 0) {
+            // Schema 4 allowed a contradictory state: the publish switch could be enabled while
+            // its probability remained at the disabled default of zero. Preserve explicit publish
+            // intent only when the remaining safety contract is complete; otherwise keep it off.
+            if (config.maxComments > 0 && !clean(config.commentTexts).isEmpty()) {
+                config.commentRate = DEFAULT_ENABLED_COMMENT_RATE;
+            } else {
+                config.commentEnabled = false;
+            }
+        }
         config.validate();
         return config;
+    }
+
+    /** Whether the positive-interest miss rule currently contributes an action trigger. */
+    public boolean unmatchedInterestFeedbackEnabled() {
+        return interestEnabled && unmatchedAsNotInterested;
+    }
+
+    /** Whether the workflow must retain the shared "not interested" action step. */
+    public boolean hasNotInterestedTrigger() {
+        return notInterestedEnabled || unmatchedInterestFeedbackEnabled();
     }
 
     static void migrateLegacyNotInterested(WarmupConfig config, List<String> legacyKeywords) {
         config.notInterestedKeywords = clean(legacyKeywords);
         config.notInterestedEnabled = !config.notInterestedKeywords.isEmpty();
+        config.notInterestedRate = 1.0;
+        config.maxNotInterested = 3;
         config.interestKeywords = new ArrayList<>();
         config.interestEnabled = false;
     }

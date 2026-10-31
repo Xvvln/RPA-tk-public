@@ -52,6 +52,7 @@ public final class SettingsActivity extends Activity {
     private MaterialButton normalProfile;
     private MaterialButton activeProfile;
     private MaterialButton customProfile;
+    private TextView profileDescription;
     private EditText maxMinutes;
     private EditText videoCount;
     private MaterialButtonToggleGroup journeyMode;
@@ -114,6 +115,7 @@ public final class SettingsActivity extends Activity {
 
     private ModuleCard interestModule;
     private EditText interestKeywords;
+    private MaterialSwitch unmatchedAsNotInterested;
     private RangeSlider interestWatchExtraRange;
     private ModuleCard notInterestedModule;
     private EditText notInterestedKeywords;
@@ -227,6 +229,9 @@ public final class SettingsActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
         profileParams.topMargin = dp(6);
         content.addView(profiles, profileParams);
+        profileDescription = text("", 12, RpaPalette.TEXT_MUTED);
+        profileDescription.setPadding(dp(2), dp(7), dp(2), dp(7));
+        content.addView(profileDescription);
 
         LinearLayout budget = row();
         maxMinutes = number("20", false);
@@ -403,7 +408,7 @@ public final class SettingsActivity extends Activity {
     private View buildCommentDetails() {
         LinearLayout details = details();
         commentRate = rateSlider();
-        details.addView(sliderBlock("执行概率", commentRate));
+        details.addView(sliderBlock("发布评论概率", commentRate));
         maxComments = number("1", false);
         details.addView(field("单次任务上限", maxComments));
         commentRelevant = checkbox("仅对符合兴趣的视频执行");
@@ -447,6 +452,18 @@ public final class SettingsActivity extends Activity {
         LinearLayout details = details();
         interestKeywords = input("AI, technology, programming");
         details.addView(field("正向兴趣词（逗号分隔）", interestKeywords));
+        unmatchedAsNotInterested = optionSwitch("未命中关键词时标记为不感兴趣", false);
+        unmatchedAsNotInterested.setOnCheckedChangeListener((button, checked) -> {
+            refreshSummaries();
+            refreshWorkflowRows();
+        });
+        details.addView(unmatchedAsNotInterested);
+        TextView unmatchedNote = text(
+                "开启后，标题、简介、作者、音乐及该步骤前已读取的评论均未命中时，"
+                        + "会执行一次“不感兴趣”；每条都触发，但仍受“不感兴趣”的单次任务上限约束。",
+                12, RpaPalette.TEXT_MUTED);
+        unmatchedNote.setPadding(0, 0, 0, dp(6));
+        details.addView(unmatchedNote);
         details.addView(fieldLabel("命中后额外观看秒数"));
         interestWatchExtraRange = range(0, 30, 1, 0, 0);
         details.addView(interestWatchExtraRange);
@@ -587,6 +604,7 @@ public final class SettingsActivity extends Activity {
 
         interestModule.toggle.setChecked(config.interestEnabled);
         interestKeywords.setText(String.join(", ", config.interestKeywords));
+        unmatchedAsNotInterested.setChecked(config.unmatchedAsNotInterested);
         interestWatchExtraRange.setValues((float) config.interestWatchExtraMinSeconds,
                 (float) config.interestWatchExtraMaxSeconds);
         notInterestedModule.toggle.setChecked(config.notInterestedEnabled);
@@ -668,6 +686,7 @@ public final class SettingsActivity extends Activity {
 
         config.interestEnabled = interestModule.toggle.isChecked();
         config.interestKeywords = csv(interestKeywords.getText().toString());
+        config.unmatchedAsNotInterested = unmatchedAsNotInterested.isChecked();
         config.interestWatchExtraMinSeconds = Math.round(
                 interestWatchExtraRange.getValues().get(0));
         config.interestWatchExtraMaxSeconds = Math.round(
@@ -695,7 +714,12 @@ public final class SettingsActivity extends Activity {
             refreshWorkflowRows();
             return;
         }
-        workingConfig = WarmupConfig.defaultsFor(profile);
+        workingConfig.searchKeywords = csv(searchKeywords.getText().toString());
+        workingConfig.interestKeywords = csv(interestKeywords.getText().toString());
+        workingConfig.unmatchedAsNotInterested = unmatchedAsNotInterested.isChecked();
+        workingConfig.notInterestedKeywords = csv(notInterestedKeywords.getText().toString());
+        workingConfig.commentTexts = lines(commentTexts.getText().toString());
+        workingConfig = WarmupConfig.presetFor(profile, workingConfig);
         loadConfig(workingConfig);
     }
 
@@ -704,6 +728,25 @@ public final class SettingsActivity extends Activity {
         styleProfileButton(normalProfile, "normal".equals(selectedProfile));
         styleProfileButton(activeProfile, "active".equals(selectedProfile));
         styleProfileButton(customProfile, "custom".equals(selectedProfile));
+        if (profileDescription == null) return;
+        switch (selectedProfile) {
+            case "normal":
+                profileDescription.setText(
+                        "推荐驱动 · 中等评论区浏览与互动 · 有完整关键词时穿插搜索 · 低频关注");
+                break;
+            case "active":
+                profileDescription.setText(
+                        "推荐驱动 · 更深评论区浏览 · 更快触发搜索 · 启用关注与公开转发");
+                break;
+            case "custom":
+                profileDescription.setText("保留当前模块与参数，并允许自定义来源和动作顺序");
+                break;
+            case "cold":
+            default:
+                profileDescription.setText(
+                        "推荐流为主 · 慢节奏浏览 · 少量评论区、点赞与收藏 · 不主动搜索或发评论");
+                break;
+        }
     }
 
     private void refreshWorkflowRows() {
@@ -837,7 +880,10 @@ public final class SettingsActivity extends Activity {
             case WarmupConfig.STEP_COMMENT: return commentModule.toggle.isChecked();
             case WarmupConfig.STEP_FOLLOW: return followModule.toggle.isChecked();
             case WarmupConfig.STEP_SHARE: return shareModule.toggle.isChecked();
-            case WarmupConfig.STEP_NOT_INTERESTED: return notInterestedModule.toggle.isChecked();
+            case WarmupConfig.STEP_NOT_INTERESTED:
+                return notInterestedModule.toggle.isChecked()
+                        || (interestModule.toggle.isChecked()
+                        && unmatchedAsNotInterested.isChecked());
             default: return false;
         }
     }
@@ -884,10 +930,13 @@ public final class SettingsActivity extends Activity {
         interestModule.summary.setText(interestModule.toggle.isChecked()
                 ? Math.max(1, csv(interestKeywords.getText().toString()).size())
                 + " 个正向词 · 额外 " + rangeSummary(interestWatchExtraRange) + " 秒"
+                + (unmatchedAsNotInterested.isChecked() ? " · 未命中→不感兴趣" : "")
                 : "未启用");
         notInterestedModule.summary.setText(notInterestedModule.toggle.isChecked()
                 ? Math.max(1, csv(notInterestedKeywords.getText().toString()).size()) + " 个负向词 · "
                 + Math.round(notInterestedRate.getValue()) + "% · 最多 " + safe(maxNotInterested) + " 次"
+                : interestModule.toggle.isChecked() && unmatchedAsNotInterested.isChecked()
+                ? "由兴趣未命中触发 · 每条执行 · 最多 " + safe(maxNotInterested) + " 次"
                 : "未启用");
         recoveryModule.summary.setText(recoveryModule.toggle.isChecked()
                 ? "已启用 · 最多 " + safe(maxRecoveryActions) + " 次" : "关闭自动恢复");
@@ -1378,6 +1427,11 @@ public final class SettingsActivity extends Activity {
                 if (!switchable && !checked) {
                     toggle.setChecked(true);
                     return;
+                }
+                if (uiReady && checked && ModuleCard.this == commentModule
+                        && commentRate != null && commentRate.getValue() <= 0f) {
+                    commentRate.setValue(
+                            (float) (WarmupConfig.DEFAULT_ENABLED_COMMENT_RATE * 100d));
                 }
                 refreshSummaries();
                 refreshWorkflowRows();

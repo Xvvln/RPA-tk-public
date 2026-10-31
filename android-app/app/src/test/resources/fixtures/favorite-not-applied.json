@@ -1,0 +1,101 @@
+{
+  "captured_at": 1785145366383,
+  "foreground_package": "com.zhiliaoapp.musically",
+  "display_width": 1080,
+  "display_height": 2400,
+  "windows": [
+    {
+      "id": 9213,
+      "package": "com.android.systemui",
+      "type": 3,
+      "layer": 2,
+      "active": false,
+      "focused": false,
+      "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 103}
+    },
+    {
+      "id": 9239,
+      "package": "com.xwell.rpatt",
+      "type": 3,
+      "layer": 1,
+      "active": false,
+      "focused": false,
+      "bounds": {"left": -4, "top": 299, "right": 235, "bottom": 1229}
+    },
+    {
+      "id": 9202,
+      "package": "com.zhiliaoapp.musically",
+      "type": 1,
+      "layer": 0,
+      "active": true,
+      "focused": true,
+      "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 2400}
+    }
+  ],
+  "nodes": [
+    {
+      "id": "com.xwell.rpatt:id/overlay",
+      "text": "",
+      "description": "",
+      "class": "android.widget.FrameLayout",
+      "package": "com.xwell.rpatt",
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 9239,
+      "tree_path": "0",
+      "bounds": {"left": -4, "top": 299, "right": 235, "bottom": 1229}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/hrs",
+      "text": "",
+      "description": "",
+      "class": "android.widget.FrameLayout",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 9202,
+      "tree_path": "0/0/0/1/2/3/0",
+      "bounds": {"left": 888, "top": 1659, "right": 1080, "bottom": 1839}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/hrt",
+      "text": "",
+      "description": "将此视频添加到或移出收藏。",
+      "class": "android.widget.Button",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": false,
+      "visible_to_user": true,
+      "window_id": 9202,
+      "tree_path": "0/0/0/1/2/3/0/0",
+      "bounds": {"left": 888, "top": 1659, "right": 1080, "bottom": 1839}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/hrs",
+      "text": "",
+      "description": "",
+      "class": "android.widget.FrameLayout",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": true,
+      "visible_to_user": true,
+      "window_id": 9202,
+      "tree_path": "0/0/0/2/2/3/0",
+      "bounds": {"left": 888, "top": 3864, "right": 1080, "bottom": 2205}
+    },
+    {
+      "id": "com.zhiliaoapp.musically:id/hrt",
+      "text": "",
+      "description": "将此视频添加到或移出收藏。",
+      "class": "android.widget.Button",
+      "package": "com.zhiliaoapp.musically",
+      "selected": false,
+      "clickable": false,
+      "visible_to_user": true,
+      "window_id": 9202,
+      "tree_path": "0/0/0/2/2/3/0/0",
+      "bounds": {"left": 888, "top": 3864, "right": 1080, "bottom": 2205}
+    }
+  ]
+}
